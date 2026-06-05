@@ -2,7 +2,7 @@
 
 import { ChangeEvent, useCallback, useEffect, useMemo, useRef, useState } from 'react'
 import { Session } from '@supabase/supabase-js'
-import { AssetRecordType, Editor, Tldraw } from 'tldraw'
+import { AssetRecordType, Editor, Tldraw, TLEditorSnapshot, TLStoreSnapshot } from 'tldraw'
 import { moodboardShapeUtils } from '@/components/moodboardShapes'
 import { BoardDoc, SourceImage, cleanHexColors, cleanTags, isMoodboardDocument } from '@/lib/board'
 import { StoredBoard } from '@/lib/boards'
@@ -76,30 +76,15 @@ export function BoardClient() {
   const getStoredTldrawSnapshot = (document: unknown) =>
     isMoodboardDocument(document) ? document.tldraw : document
 
+  const tldrawSnapshot = useMemo(() => {
+    const snapshot = boardRecord ? getStoredTldrawSnapshot(boardRecord.document) : null
+    return isTldrawSnapshot(snapshot) ? (snapshot as TLEditorSnapshot | TLStoreSnapshot) : undefined
+  }, [boardRecord])
+
   const setSourceList = (nextSources: SourceImage[]) => {
     sourcesRef.current = nextSources
     setSources(nextSources)
   }
-
-  const loadSnapshotIntoEditor = useCallback((editor: Editor, board: StoredBoard) => {
-    const snapshot = getStoredTldrawSnapshot(board.document)
-    if (!isTldrawSnapshot(snapshot)) return
-
-    suppressSaveRef.current = true
-    editor.loadSnapshot(snapshot as Parameters<Editor['loadSnapshot']>[0])
-
-    const zoomLoadedContent = () => {
-      editor.zoomToFit()
-    }
-
-    window.requestAnimationFrame(() => {
-      zoomLoadedContent()
-      window.setTimeout(() => {
-        zoomLoadedContent()
-        suppressSaveRef.current = false
-      }, 120)
-    })
-  }, [])
 
   const applyStoredBoard = useCallback((board: StoredBoard) => {
     boardRef.current = board
@@ -107,10 +92,7 @@ export function BoardClient() {
     setBrief(board.brief ?? '')
     briefRef.current = board.brief ?? ''
     setSourceList(isMoodboardDocument(board.document) ? board.document.sources : [])
-
-    const editor = editorRef.current
-    if (editor) loadSnapshotIntoEditor(editor, board)
-  }, [loadSnapshotIntoEditor])
+  }, [])
 
   const loadBoard = useCallback(
     async (nextSession: Session) => {
@@ -830,21 +812,34 @@ export function BoardClient() {
           )}
         </aside>
 
-        <div className="min-w-0 flex-1">
-          <Tldraw
-            licenseKey={tldrawLicenseKey}
-            shapeUtils={shapeUtils}
-            onMount={(editor) => {
-              editorRef.current = editor
-              if (boardRef.current) loadSnapshotIntoEditor(editor, boardRef.current)
-              editor.store.listen(
-                () => {
-                  scheduleSave()
-                },
-                { source: 'user', scope: 'document' }
-              )
-            }}
-          />
+        <div className="relative min-w-0 flex-1">
+          <div className="absolute inset-0">
+            <Tldraw
+              key={boardRecord?.id ?? 'anonymous'}
+              licenseKey={tldrawLicenseKey}
+              shapeUtils={shapeUtils}
+              snapshot={tldrawSnapshot}
+              onMount={(editor) => {
+                editorRef.current = editor
+                if (tldrawSnapshot) {
+                  suppressSaveRef.current = true
+                  window.requestAnimationFrame(() => {
+                    editor.zoomToFit()
+                    window.setTimeout(() => {
+                      editor.zoomToFit()
+                      suppressSaveRef.current = false
+                    }, 160)
+                  })
+                }
+                editor.store.listen(
+                  () => {
+                    scheduleSave()
+                  },
+                  { source: 'user', scope: 'document' }
+                )
+              }}
+            />
+          </div>
         </div>
       </section>
 
