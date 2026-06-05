@@ -24,7 +24,7 @@ EXTRACTION_TIMEOUT_MS=180000
 `SUPABASE_SERVICE_ROLE_KEY` is server-only and must not be exposed to the browser.
 Set `NEXT_PUBLIC_TLDRAW_LICENSE_KEY` before public deploy to remove the production license watermark.
 
-## Supabase setup
+## Supabase setup.
 
 Create the boards table:
 
