@@ -1,0 +1,30 @@
+{
+  "brief": "Editorial streetwear lookbook in an abandoned tennis court",
+  "elements": [
+    {
+      "url": "https://storage.example/editorial-court.jpg",
+      "label": "abandoned tennis court",
+      "tags": ["composition", "mood", "lighting"]
+    },
+    {
+      "url": "https://storage.example/washed-denim.jpg",
+      "label": "washed denim styling",
+      "tags": ["texture", "subject"]
+    }
+  ],
+  "swatches": [
+    {
+      "colors": ["#111827", "#f97316", "#f8fafc"]
+    }
+  ],
+  "typeSamples": [
+    {
+      "label": "Condensed grotesk with wide tracking"
+    }
+  ],
+  "notes": [
+    {
+      "text": "sun-baked, sparse, confident"
+    }
+  ]
+}

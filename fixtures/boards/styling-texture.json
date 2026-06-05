@@ -1,0 +1,26 @@
+{
+  "brief": "Tactile styling reference for a monochrome accessories shoot",
+  "elements": [
+    {
+      "url": "https://storage.example/black-leather.jpg",
+      "label": "black leather cutout",
+      "tags": ["texture", "lighting"]
+    },
+    {
+      "url": "https://storage.example/silver-hardware.jpg",
+      "label": "silver hardware",
+      "tags": ["subject", "composition"]
+    }
+  ],
+  "swatches": [
+    {
+      "colors": ["#050505", "#8b8f96", "#e5e7eb"]
+    }
+  ],
+  "typeSamples": [],
+  "notes": [
+    {
+      "text": "restrained, expensive, macro detail"
+    }
+  ]
+}

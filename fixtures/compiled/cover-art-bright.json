@@ -1,0 +1,11 @@
+{
+  "source": "fixtures/boards/cover-art-bright.json",
+  "compiled": {
+    "prompt": "Playful cover-art scene for a summer pop release. Color palette: #ffcc00, #0099cc, #ff4f79, #ffffff. Element 1 — fruit market props: include as color influence, subject or object. Element 2 — pool flatlay: include as composition reference, mood reference. Mood and intent: clean graphic shapes, optimistic, high contrast. Generate a single cohesive image that combines the above.",
+    "image_urls": [
+      "https://storage.example/fruit-market.jpg",
+      "https://storage.example/pool-flatlay.jpg"
+    ],
+    "model": "fal-ai/nano-banana-pro/edit"
+  }
+}

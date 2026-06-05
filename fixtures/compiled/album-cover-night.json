@@ -1,0 +1,11 @@
+{
+  "source": "fixtures/boards/album-cover-night.json",
+  "compiled": {
+    "prompt": "Moody album cover portrait for a nocturnal R&B single. Color palette: #123456, #abcdef, #f97316. Element 1 — neon portrait cutout: include as color influence, lighting reference, mood reference. Element 2 — rain texture: include as texture or surface quality, composition reference. Mood and intent: intimate, cinematic, wet asphalt glow. Set any typography in the style of Small serif title lockup; do not render text unless the brief asks for it. Generate a single cohesive image that combines the above.",
+    "image_urls": [
+      "https://storage.example/neon-face.jpg",
+      "https://storage.example/window-rain.jpg"
+    ],
+    "model": "fal-ai/nano-banana-pro/edit"
+  }
+}

@@ -1,0 +1,11 @@
+{
+  "source": "fixtures/boards/editorial-streetwear.json",
+  "compiled": {
+    "prompt": "Editorial streetwear lookbook in an abandoned tennis court. Color palette: #111827, #f97316, #f8fafc. Element 1 — abandoned tennis court: include as composition reference, mood reference, lighting reference. Element 2 — washed denim styling: include as texture or surface quality, subject or object. Mood and intent: sun-baked, sparse, confident. Set any typography in the style of Condensed grotesk with wide tracking; do not render text unless the brief asks for it. Generate a single cohesive image that combines the above.",
+    "image_urls": [
+      "https://storage.example/editorial-court.jpg",
+      "https://storage.example/washed-denim.jpg"
+    ],
+    "model": "fal-ai/nano-banana-pro/edit"
+  }
+}

@@ -1,0 +1,11 @@
+{
+  "source": "fixtures/boards/styling-texture.json",
+  "compiled": {
+    "prompt": "Tactile styling reference for a monochrome accessories shoot. Color palette: #050505, #8b8f96, #e5e7eb. Element 1 — black leather cutout: include as texture or surface quality, lighting reference. Element 2 — silver hardware: include as subject or object, composition reference. Mood and intent: restrained, expensive, macro detail. Generate a single cohesive image that combines the above.",
+    "image_urls": [
+      "https://storage.example/black-leather.jpg",
+      "https://storage.example/silver-hardware.jpg"
+    ],
+    "model": "fal-ai/nano-banana-pro/edit"
+  }
+}

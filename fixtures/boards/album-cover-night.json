@@ -1,0 +1,26 @@
+{
+  "brief": "Moody album cover portrait for a nocturnal R&B single",
+  "elements": [
+    {
+      "url": "https://storage.example/neon-face.jpg",
+      "label": "neon portrait cutout",
+      "tags": ["color", "lighting", "mood"]
+    },
+    {
+      "url": "https://storage.example/window-rain.jpg",
+      "label": "rain texture",
+      "tags": ["texture", "composition"]
+    }
+  ],
+  "swatches": [],
+  "typeSamples": [
+    {
+      "label": "Small serif title lockup"
+    }
+  ],
+  "notes": [
+    {
+      "text": "intimate, cinematic, wet asphalt glow"
+    }
+  ]
+}

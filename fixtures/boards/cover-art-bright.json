@@ -1,0 +1,26 @@
+{
+  "brief": "Playful cover-art scene for a summer pop release",
+  "elements": [
+    {
+      "url": "https://storage.example/fruit-market.jpg",
+      "label": "fruit market props",
+      "tags": ["color", "subject"]
+    },
+    {
+      "url": "https://storage.example/pool-flatlay.jpg",
+      "label": "pool flatlay",
+      "tags": ["composition", "mood"]
+    }
+  ],
+  "swatches": [
+    {
+      "colors": ["#ffcc00", "#0099cc", "#ff4f79", "#ffffff"]
+    }
+  ],
+  "typeSamples": [],
+  "notes": [
+    {
+      "text": "clean graphic shapes, optimistic, high contrast"
+    }
+  ]
+}
