@@ -48,6 +48,7 @@ export function BoardClient() {
   const saveTimerRef = useRef<ReturnType<typeof setTimeout> | null>(null)
   const sessionRef = useRef<Session | null>(null)
   const boardRef = useRef<StoredBoard | null>(null)
+  const initialSnapshotRef = useRef<TLEditorSnapshot | TLStoreSnapshot | undefined>(undefined)
   const suppressSaveRef = useRef(false)
   const [brief, setBrief] = useState('')
   const briefRef = useRef('')
@@ -77,8 +78,15 @@ export function BoardClient() {
     isMoodboardDocument(document) ? document.tldraw : document
 
   const tldrawSnapshot = useMemo(() => {
+    // eslint-disable-next-line react-hooks/refs
+    if (initialSnapshotRef.current) return initialSnapshotRef.current
     const snapshot = boardRecord ? getStoredTldrawSnapshot(boardRecord.document) : null
-    return isTldrawSnapshot(snapshot) ? (snapshot as TLEditorSnapshot | TLStoreSnapshot) : undefined
+    const valid = isTldrawSnapshot(snapshot)
+      ? (snapshot as TLEditorSnapshot | TLStoreSnapshot)
+      : undefined
+    // eslint-disable-next-line react-hooks/refs
+    if (valid) initialSnapshotRef.current = valid
+    return valid
   }, [boardRecord])
 
   const setSourceList = (nextSources: SourceImage[]) => {
@@ -122,16 +130,18 @@ export function BoardClient() {
   )
 
   useEffect(() => {
-    const { data } = supabase.auth.onAuthStateChange((_event, nextSession) => {
+    const { data } = supabase.auth.onAuthStateChange((event, nextSession) => {
       sessionRef.current = nextSession
       setSession(nextSession)
       if (nextSession) {
         void loadBoard(nextSession)
-      } else {
+      } else if (event === 'SIGNED_OUT') {
         boardRef.current = null
+        initialSnapshotRef.current = undefined
         setBoardRecord(null)
         setSaveState('idle')
       }
+      // Ignore a null INITIAL_SESSION; do not reset the board or it remounts empty.
     })
 
     void supabase.auth.getSession().then(({ data: sessionData }) => {
@@ -821,22 +831,24 @@ export function BoardClient() {
               snapshot={tldrawSnapshot}
               onMount={(editor) => {
                 editorRef.current = editor
+                let disposed = false
                 if (tldrawSnapshot) {
                   suppressSaveRef.current = true
                   window.requestAnimationFrame(() => {
+                    if (disposed) return
                     editor.zoomToFit()
                     window.setTimeout(() => {
+                      if (disposed) return
                       editor.zoomToFit()
                       suppressSaveRef.current = false
                     }, 160)
                   })
                 }
-                editor.store.listen(
-                  () => {
-                    scheduleSave()
-                  },
-                  { source: 'user', scope: 'document' }
-                )
+                const unlisten = editor.store.listen(() => scheduleSave(), { source: 'user', scope: 'document' })
+                return () => {
+                  disposed = true
+                  unlisten()
+                }
               }}
             />
           </div>
