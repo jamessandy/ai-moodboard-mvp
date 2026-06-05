@@ -8,7 +8,7 @@ import {
 } from '@/lib/supabase/server'
 
 export const runtime = 'nodejs'
-export const maxDuration = 300
+export const maxDuration = 60
 
 const MAX_EXTRACT_REQUESTS_PER_WINDOW = Number(process.env.MAX_EXTRACT_REQUESTS_PER_WINDOW ?? 8)
 const MAX_EXTRACTIONS_PER_USER = Number(process.env.MAX_EXTRACTIONS_PER_USER ?? 80)

@@ -10,7 +10,7 @@ import {
 } from '@/lib/supabase/server'
 
 export const runtime = 'nodejs'
-export const maxDuration = 300
+export const maxDuration = 60
 
 const DEFAULT_VARIATIONS = 6
 const MAX_GENERATIONS_PER_BOARD = Number(process.env.MAX_GENERATIONS_PER_BOARD ?? 40)
