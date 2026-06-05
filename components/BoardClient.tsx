@@ -81,6 +81,26 @@ export function BoardClient() {
     setSources(nextSources)
   }
 
+  const loadSnapshotIntoEditor = useCallback((editor: Editor, board: StoredBoard) => {
+    const snapshot = getStoredTldrawSnapshot(board.document)
+    if (!isTldrawSnapshot(snapshot)) return
+
+    suppressSaveRef.current = true
+    editor.loadSnapshot(snapshot as Parameters<Editor['loadSnapshot']>[0])
+
+    const zoomLoadedContent = () => {
+      editor.zoomToFit()
+    }
+
+    window.requestAnimationFrame(() => {
+      zoomLoadedContent()
+      window.setTimeout(() => {
+        zoomLoadedContent()
+        suppressSaveRef.current = false
+      }, 120)
+    })
+  }, [])
+
   const applyStoredBoard = useCallback((board: StoredBoard) => {
     boardRef.current = board
     setBoardRecord(board)
@@ -89,16 +109,8 @@ export function BoardClient() {
     setSourceList(isMoodboardDocument(board.document) ? board.document.sources : [])
 
     const editor = editorRef.current
-    const snapshot = getStoredTldrawSnapshot(board.document)
-    if (!editor || !isTldrawSnapshot(snapshot)) return
-
-    suppressSaveRef.current = true
-    editor.loadSnapshot(snapshot as Parameters<Editor['loadSnapshot']>[0])
-    editor.zoomToFit()
-    window.setTimeout(() => {
-      suppressSaveRef.current = false
-    }, 0)
-  }, [])
+    if (editor) loadSnapshotIntoEditor(editor, board)
+  }, [loadSnapshotIntoEditor])
 
   const loadBoard = useCallback(
     async (nextSession: Session) => {
@@ -824,15 +836,7 @@ export function BoardClient() {
             shapeUtils={shapeUtils}
             onMount={(editor) => {
               editorRef.current = editor
-              const snapshot = boardRef.current ? getStoredTldrawSnapshot(boardRef.current.document) : null
-              if (snapshot && isTldrawSnapshot(snapshot)) {
-                suppressSaveRef.current = true
-                editor.loadSnapshot(snapshot as Parameters<Editor['loadSnapshot']>[0])
-                editor.zoomToFit()
-                window.setTimeout(() => {
-                  suppressSaveRef.current = false
-                }, 0)
-              }
+              if (boardRef.current) loadSnapshotIntoEditor(editor, boardRef.current)
               editor.store.listen(
                 () => {
                   scheduleSave()
