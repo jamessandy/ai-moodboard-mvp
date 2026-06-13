@@ -2,14 +2,17 @@
 
 import { ChangeEvent, useCallback, useEffect, useMemo, useRef, useState } from 'react'
 import { Session } from '@supabase/supabase-js'
-import { AssetRecordType, Editor, Tldraw, TLEditorSnapshot, TLStoreSnapshot } from 'tldraw'
+import { AssetRecordType, Editor, Tldraw, TLEditorSnapshot, TLComponents, TLStoreSnapshot } from 'tldraw'
 import { moodboardShapeUtils } from '@/components/moodboardShapes'
-import { BoardDoc, SourceImage, cleanHexColors, cleanTags, isMoodboardDocument } from '@/lib/board'
+import { BoardDoc, ChatMessage, SourceImage, cleanHexColors, cleanTags, isMoodboardDocument } from '@/lib/board'
 import { StoredBoard } from '@/lib/boards'
 import { createBrowserSupabaseClient } from '@/lib/supabase/client'
 
 type ImportState = 'idle' | 'importing'
 type GenerationState = 'idle' | 'generating'
+type ComposingState = 'idle' | 'composing'
+type ChatState = 'idle' | 'thinking' | 'generating'
+type ComposePosition = 'top-left' | 'top' | 'top-right' | 'left' | 'center' | 'right' | 'bottom-left' | 'bottom' | 'bottom-right'
 type TrayOutput = {
   slot: number
   status: 'pending' | 'done' | 'error'
@@ -35,9 +38,80 @@ const DEFAULT_SWATCHES = [
   ['#264653', '#2a9d8f', '#e9c46a', '#f4a261'],
   ['#0f172a', '#e11d48', '#f1f5f9'],
 ]
+const COMPOSE_POSITIONS: Array<{ id: ComposePosition; label: string; x: number; y: number }> = [
+  { id: 'top-left', label: 'TL', x: 0.22, y: 0.22 },
+  { id: 'top', label: 'T', x: 0.5, y: 0.22 },
+  { id: 'top-right', label: 'TR', x: 0.78, y: 0.22 },
+  { id: 'left', label: 'L', x: 0.22, y: 0.5 },
+  { id: 'center', label: 'C', x: 0.5, y: 0.5 },
+  { id: 'right', label: 'R', x: 0.78, y: 0.5 },
+  { id: 'bottom-left', label: 'BL', x: 0.22, y: 0.78 },
+  { id: 'bottom', label: 'B', x: 0.5, y: 0.78 },
+  { id: 'bottom-right', label: 'BR', x: 0.78, y: 0.78 },
+]
 
 function randomFrom<T>(items: T[]) {
   return items[Math.floor(Math.random() * items.length)]
+}
+
+function isInvalidRefreshTokenError(error: unknown) {
+  return error instanceof Error && /invalid refresh token|refresh token.*already used|already used/i.test(error.message)
+}
+
+function getStoredChatMessages(document: unknown): ChatMessage[] {
+  if (!isMoodboardDocument(document) || !Array.isArray(document.chat)) return []
+
+  return document.chat
+    .filter(
+      (message): message is ChatMessage =>
+        Boolean(
+          message &&
+            typeof message === 'object' &&
+            typeof message.id === 'string' &&
+            (message.role === 'user' || message.role === 'assistant') &&
+            typeof message.content === 'string' &&
+            typeof message.createdAt === 'string'
+        )
+    )
+    .map((message) => ({
+      ...message,
+      images: Array.isArray(message.images)
+        ? message.images.filter((image) => image && typeof image.url === 'string')
+        : undefined,
+    }))
+}
+
+function isRecordObject(value: unknown): value is Record<string, unknown> {
+  return Boolean(value && typeof value === 'object' && !Array.isArray(value))
+}
+
+function isLegacyMoodboardNoteRecord(record: unknown) {
+  if (!isRecordObject(record) || record.typeName !== 'shape' || record.type !== 'note') return false
+  if (!isRecordObject(record.props)) return false
+
+  return (
+    typeof record.props.text === 'string' &&
+    typeof record.props.w === 'number' &&
+    typeof record.props.h === 'number'
+  )
+}
+
+function migrateMoodboardNoteSnapshot(snapshot: TLEditorSnapshot | TLStoreSnapshot) {
+  if (!('store' in snapshot) || !isRecordObject(snapshot.store)) return snapshot
+
+  let changed = false
+  const nextStore: Record<string, unknown> = {}
+
+  for (const [id, record] of Object.entries(snapshot.store)) {
+    if (isLegacyMoodboardNoteRecord(record)) {
+      changed = true
+      nextStore[id] = { ...record, type: 'moodboard-note' }
+    } else {
+      nextStore[id] = record
+    }
+  }
+
+  return changed ? ({ ...snapshot, store: nextStore } as TLEditorSnapshot | TLStoreSnapshot) : snapshot
 }
 
 export function BoardClient() {
@@ -55,6 +129,14 @@ export function BoardClient() {
   const [url, setUrl] = useState('')
   const [sources, setSources] = useState<SourceImage[]>([])
   const sourcesRef = useRef<SourceImage[]>([])
+  const [chatMessages, setChatMessages] = useState<ChatMessage[]>([])
+  const chatMessagesRef = useRef<ChatMessage[]>([])
+  const [chatInput, setChatInput] = useState('')
+  const [chatState, setChatState] = useState<ChatState>('idle')
+  const [chatPanelOpen, setChatPanelOpen] = useState(false)
+  const [sourcesOpen, setSourcesOpen] = useState(true)
+  const [commentMode, setCommentMode] = useState(false)
+  const [showResolvedComments, setShowResolvedComments] = useState(true)
   const [extractPrompts, setExtractPrompts] = useState<Record<string, string>>({})
   const [extractionState, setExtractionState] = useState<ExtractionState>(null)
   const [email, setEmail] = useState('')
@@ -64,12 +146,26 @@ export function BoardClient() {
   const [shareMessage, setShareMessage] = useState<string | null>(null)
   const [importState, setImportState] = useState<ImportState>('idle')
   const [generationState, setGenerationState] = useState<GenerationState>('idle')
+  const [composingState, setComposingState] = useState<ComposingState>('idle')
   const [outputs, setOutputs] = useState<TrayOutput[]>([])
   const [selectedOutputSlot, setSelectedOutputSlot] = useState<number | null>(null)
-  const [promptPreview, setPromptPreview] = useState<PromptPreview | null>(null)
+  const [composeHeadline, setComposeHeadline] = useState('')
+  const [composeFontName, setComposeFontName] = useState('Anton')
+  const [composeFontUrl, setComposeFontUrl] = useState('')
+  const [composeFontWeight, setComposeFontWeight] = useState(400)
+  const [composeColor, setComposeColor] = useState('#ffffff')
+  const [composeFontSizeRatio, setComposeFontSizeRatio] = useState(0.12)
+  const [composePosition, setComposePosition] = useState<ComposePosition>('center')
+  const [composeOutline, setComposeOutline] = useState(true)
+  const [composeOutlineColor, setComposeOutlineColor] = useState('#111827')
   const [error, setError] = useState<string | null>(null)
 
   const shapeUtils = useMemo(() => moodboardShapeUtils, [])
+  const tldrawComponents = useMemo<TLComponents>(() => ({ StylePanel: null }), [])
+  const selectedOutput = useMemo(
+    () => outputs.find((output) => output.slot === selectedOutputSlot && output.status === 'done' && output.url),
+    [outputs, selectedOutputSlot]
+  )
 
   const isTldrawSnapshot = (document: unknown) =>
     Boolean(document && typeof document === 'object' && 'store' in document && 'schema' in document)
@@ -82,7 +178,7 @@ export function BoardClient() {
     if (initialSnapshotRef.current) return initialSnapshotRef.current
     const snapshot = boardRecord ? getStoredTldrawSnapshot(boardRecord.document) : null
     const valid = isTldrawSnapshot(snapshot)
-      ? (snapshot as TLEditorSnapshot | TLStoreSnapshot)
+      ? migrateMoodboardNoteSnapshot(snapshot as TLEditorSnapshot | TLStoreSnapshot)
       : undefined
     // eslint-disable-next-line react-hooks/refs
     if (valid) initialSnapshotRef.current = valid
@@ -94,12 +190,26 @@ export function BoardClient() {
     setSources(nextSources)
   }
 
+  const resetPersistedSession = useCallback(() => {
+    sessionRef.current = null
+    setSession(null)
+    boardRef.current = null
+    initialSnapshotRef.current = undefined
+    setBoardRecord(null)
+    chatMessagesRef.current = []
+    setChatMessages([])
+    setSaveState('idle')
+  }, [])
+
   const applyStoredBoard = useCallback((board: StoredBoard) => {
+    const storedChat = getStoredChatMessages(board.document)
     boardRef.current = board
     setBoardRecord(board)
     setBrief(board.brief ?? '')
     briefRef.current = board.brief ?? ''
     setSourceList(isMoodboardDocument(board.document) ? board.document.sources : [])
+    chatMessagesRef.current = storedChat
+    setChatMessages(storedChat)
   }, [])
 
   const loadBoard = useCallback(
@@ -136,24 +246,42 @@ export function BoardClient() {
       if (nextSession) {
         void loadBoard(nextSession)
       } else if (event === 'SIGNED_OUT') {
-        boardRef.current = null
-        initialSnapshotRef.current = undefined
-        setBoardRecord(null)
-        setSaveState('idle')
+        resetPersistedSession()
       }
       // Ignore a null INITIAL_SESSION; do not reset the board or it remounts empty.
     })
 
-    void supabase.auth.getSession().then(({ data: sessionData }) => {
-      sessionRef.current = sessionData.session
-      setSession(sessionData.session)
-      if (sessionData.session) void loadBoard(sessionData.session)
-    })
+    void supabase.auth
+      .getSession()
+      .then(({ data: sessionData, error: sessionError }) => {
+        if (sessionError) {
+          if (isInvalidRefreshTokenError(sessionError)) {
+            void supabase.auth.signOut({ scope: 'local' }).catch(() => null)
+            resetPersistedSession()
+            return
+          }
+          throw sessionError
+        }
+
+        sessionRef.current = sessionData.session
+        setSession(sessionData.session)
+        if (sessionData.session) void loadBoard(sessionData.session)
+      })
+      .catch((caught) => {
+        if (isInvalidRefreshTokenError(caught)) {
+          void supabase.auth.signOut({ scope: 'local' }).catch(() => null)
+          resetPersistedSession()
+          return
+        }
+
+        const message = caught instanceof Error ? caught.message : 'Could not restore session.'
+        setError(message)
+      })
 
     return () => {
       data.subscription.unsubscribe()
     }
-  }, [loadBoard, supabase])
+  }, [loadBoard, resetPersistedSession, supabase])
 
   const saveBoard = useCallback(async () => {
     const currentSession = sessionRef.current
@@ -177,6 +305,7 @@ export function BoardClient() {
             version: 2,
             sources: sourcesRef.current,
             tldraw: editor.store.getStoreSnapshot('document'),
+            chat: chatMessagesRef.current,
           },
         }),
       })
@@ -203,6 +332,16 @@ export function BoardClient() {
       void saveBoard()
     }, 900)
   }, [saveBoard])
+
+  const updateChatMessages = useCallback(
+    (next: ChatMessage[] | ((current: ChatMessage[]) => ChatMessage[]), shouldSave = true) => {
+      const nextMessages = typeof next === 'function' ? next(chatMessagesRef.current) : next
+      chatMessagesRef.current = nextMessages
+      setChatMessages(nextMessages)
+      if (shouldSave) scheduleSave()
+    },
+    [scheduleSave]
+  )
 
   useEffect(() => {
     return () => {
@@ -266,6 +405,31 @@ export function BoardClient() {
     const y = viewport.y + viewport.h / 2 - 90 + Math.random() * 36
     editor.createShape({ ...shape, x, y } as Parameters<Editor['createShape']>[0])
   }, [])
+
+  const dropCommentAtScreenPoint = useCallback(
+    (point: { x: number; y: number }) => {
+      const editor = editorRef.current
+      if (!editor) return
+
+      const pagePoint = editor.screenToPage(point)
+      const author = sessionRef.current?.user.email ?? 'Anonymous'
+      editor.createShape({
+        type: 'comment-pin',
+        x: pagePoint.x - 14,
+        y: pagePoint.y - 14,
+        props: {
+          author,
+          text: '',
+          replies: [],
+          resolved: false,
+          createdAt: new Date().toISOString(),
+        },
+      } as Parameters<Editor['createShape']>[0])
+      scheduleSave()
+      setCommentMode(false)
+    },
+    [scheduleSave]
+  )
 
   const createElementAtPoint = useCallback(
     (
@@ -370,7 +534,7 @@ export function BoardClient() {
         })
         .filter((sample) => sample.label),
       notes: shapes
-        .filter((shape) => shape.type === 'note')
+        .filter((shape) => shape.type === 'moodboard-note')
         .map((shape) => {
           const props = shape.props as { text?: string }
           return { text: props.text?.trim() ?? '' }
@@ -417,12 +581,6 @@ export function BoardClient() {
     const file = event.target.files?.[0]
     if (file) void importImage({ file })
     event.target.value = ''
-  }
-
-  const updateBrief = (nextBrief: string) => {
-    setBrief(nextBrief)
-    briefRef.current = nextBrief
-    scheduleSave()
   }
 
   const addUrlImage = () => {
@@ -525,7 +683,6 @@ export function BoardClient() {
 
   const generate = async () => {
     setError(null)
-    setPromptPreview(null)
     setSelectedOutputSlot(null)
     setGenerationState('generating')
     setOutputs(Array.from({ length: 6 }, (_, slot) => ({ slot, status: 'pending' })))
@@ -571,14 +728,6 @@ export function BoardClient() {
             | { type: 'error'; slot: number; error: string }
             | { type: 'done' }
 
-          if (event.type === 'start') {
-            setPromptPreview({
-              prompt: event.prompt,
-              palette: event.palette,
-              paletteSource: event.paletteSource,
-            })
-          }
-
           if (event.type === 'output') {
             setOutputs((current) =>
               current.map((item) =>
@@ -618,16 +767,255 @@ export function BoardClient() {
     }
   }
 
+  const sendChatMessage = async () => {
+    const content = chatInput.trim()
+    if (!content || chatState !== 'idle') return
+
+    const createdAt = new Date().toISOString()
+    const userMessage: ChatMessage = {
+      id: crypto.randomUUID(),
+      role: 'user',
+      content,
+      createdAt,
+    }
+    const assistantId = crypto.randomUUID()
+    const assistantMessage: ChatMessage = {
+      id: assistantId,
+      role: 'assistant',
+      content: 'Thinking...',
+      createdAt,
+      status: 'thinking',
+      images: [],
+    }
+    const nextMessages = [...chatMessagesRef.current, userMessage, assistantMessage]
+
+    setChatInput('')
+    setError(null)
+    setChatPanelOpen(true)
+    setChatState('thinking')
+    updateChatMessages(nextMessages)
+
+    try {
+      const board = getBoardDoc()
+      const chatResponse = await fetch('/api/chat', {
+        method: 'POST',
+        headers: { 'Content-Type': 'application/json' },
+        body: JSON.stringify({
+          history: nextMessages
+            .filter((message) => message.status !== 'thinking')
+            .map((message) => ({ role: message.role, content: message.content })),
+          board,
+        }),
+      })
+      const chatResult = (await chatResponse.json()) as {
+        assistantText?: string
+        generationPrompt?: string
+        error?: string
+      }
+
+      if (!chatResponse.ok || !chatResult.generationPrompt) {
+        throw new Error(chatResult.error ?? 'Chat failed.')
+      }
+
+      updateChatMessages((current) =>
+        current.map((message) =>
+          message.id === assistantId
+            ? {
+                ...message,
+                content: chatResult.assistantText ?? "I'll generate that direction.",
+                generationPrompt: chatResult.generationPrompt,
+                status: 'generating',
+              }
+            : message
+        )
+      )
+      setChatState('generating')
+      setSelectedOutputSlot(null)
+      setGenerationState('generating')
+      setOutputs(Array.from({ length: 6 }, (_, slot) => ({ slot, status: 'pending' })))
+
+      const generationResponse = await fetch('/api/generate', {
+        method: 'POST',
+        headers: {
+          'Content-Type': 'application/json',
+          ...(sessionRef.current ? { authorization: `Bearer ${sessionRef.current.access_token}` } : {}),
+        },
+        body: JSON.stringify({
+          boardId: getBoardId(),
+          count: 6,
+          board: { ...board, brief: chatResult.generationPrompt },
+        }),
+      })
+
+      if (!generationResponse.ok || !generationResponse.body) {
+        const result = (await generationResponse.json().catch(() => null)) as { error?: string } | null
+        throw new Error(result?.error ?? 'Generation failed.')
+      }
+
+      const reader = generationResponse.body.getReader()
+      const decoder = new TextDecoder()
+      let buffer = ''
+
+      while (true) {
+        const { done, value } = await reader.read()
+        if (done) break
+
+        buffer += decoder.decode(value, { stream: true })
+        const lines = buffer.split('\n')
+        buffer = lines.pop() ?? ''
+
+        for (const line of lines) {
+          if (!line.trim()) continue
+          const event = JSON.parse(line) as
+            | {
+                type: 'start'
+                count: number
+                prompt: string
+                palette: string[]
+                paletteSource: PromptPreview['paletteSource']
+              }
+            | { type: 'output'; slot: number; url: string; width?: number; height?: number; seed: number }
+            | { type: 'error'; slot: number; error: string }
+            | { type: 'done' }
+
+          if (event.type === 'output') {
+            setOutputs((current) =>
+              current.map((item) =>
+                item.slot === event.slot
+                  ? {
+                      slot: event.slot,
+                      status: 'done',
+                      url: event.url,
+                      width: event.width,
+                      height: event.height,
+                      seed: event.seed,
+                    }
+                  : item
+              )
+            )
+            updateChatMessages((current) =>
+              current.map((message) =>
+                message.id === assistantId
+                  ? {
+                      ...message,
+                      images: [
+                        ...(message.images ?? []),
+                        { url: event.url, width: event.width, height: event.height, seed: event.seed },
+                      ],
+                    }
+                  : message
+              )
+            )
+          }
+
+          if (event.type === 'error') {
+            setOutputs((current) =>
+              current.map((item) =>
+                item.slot === event.slot
+                  ? { slot: event.slot, status: 'error', error: event.error }
+                  : item
+              )
+            )
+            updateChatMessages((current) =>
+              current.map((message) =>
+                message.id === assistantId
+                  ? { ...message, content: `${message.content}\n${event.error}`.trim(), status: 'error' }
+                  : message
+              )
+            )
+          }
+        }
+      }
+
+      updateChatMessages((current) =>
+        current.map((message) => (message.id === assistantId ? { ...message, status: 'done' } : message))
+      )
+    } catch (caught) {
+      const message = caught instanceof Error ? caught.message : 'Chat generation failed.'
+      setError(message)
+      setOutputs((current) =>
+        current.map((item) => (item.status === 'pending' ? { ...item, status: 'error', error: message } : item))
+      )
+      updateChatMessages((current) =>
+        current.map((item) =>
+          item.id === assistantId ? { ...item, content: message, status: 'error', images: item.images ?? [] } : item
+        )
+      )
+    } finally {
+      setChatState('idle')
+      setGenerationState('idle')
+    }
+  }
+
+  const composeTextOnOutput = async () => {
+    if (!selectedOutput?.url) {
+      setError('Select a finished output first.')
+      return
+    }
+
+    const text = composeHeadline.trim()
+    const fontName = composeFontName.trim()
+    const fontUrl = composeFontUrl.trim()
+
+    if (!text) {
+      setError('Enter headline text to compose.')
+      return
+    }
+
+    if (Boolean(fontName) === Boolean(fontUrl)) {
+      setError('Enter either a Google Fonts name or a direct font-file URL.')
+      return
+    }
+
+    const position = COMPOSE_POSITIONS.find((item) => item.id === composePosition) ?? COMPOSE_POSITIONS[4]
+    setError(null)
+    setComposingState('composing')
+
+    try {
+      const response = await fetch('/api/compose-text', {
+        method: 'POST',
+        headers: {
+          'Content-Type': 'application/json',
+          ...(sessionRef.current ? { authorization: `Bearer ${sessionRef.current.access_token}` } : {}),
+        },
+        body: JSON.stringify({
+          imageUrl: selectedOutput.url,
+          text,
+          fontName: fontName || undefined,
+          fontUrl: fontUrl || undefined,
+          fontWeight: composeFontWeight,
+          fontSizeRatio: composeFontSizeRatio,
+          color: composeColor,
+          x: position.x,
+          y: position.y,
+          outlineColor: composeOutline ? composeOutlineColor : undefined,
+          outlineWidthRatio: composeOutline ? 0.04 : undefined,
+        }),
+      })
+      const result = (await response.json()) as { url?: string; width?: number; height?: number; error?: string }
+
+      if (!response.ok || !result.url) {
+        throw new Error(result.error ?? 'Text composition failed.')
+      }
+
+      const slot = outputs.length
+      setOutputs((current) => [
+        ...current,
+        { slot, status: 'done', url: result.url, width: result.width, height: result.height },
+      ])
+      setSelectedOutputSlot(slot)
+    } catch (caught) {
+      const message = caught instanceof Error ? caught.message : 'Text composition failed.'
+      setError(message)
+    } finally {
+      setComposingState('idle')
+    }
+  }
+
   return (
     <main className="flex h-screen min-h-[720px] flex-col bg-[#f4f1ea] text-neutral-950">
       <header className="flex flex-col gap-3 border-b border-neutral-950/10 bg-[#fbfaf6] px-4 py-3 shadow-sm">
         <div className="flex flex-wrap items-center gap-2">
-          <input
-            value={brief}
-            onChange={(event) => updateBrief(event.target.value)}
-            placeholder="One-line brief"
-            className="h-10 min-w-[260px] flex-1 rounded border border-neutral-300 bg-white px-3 text-sm outline-none transition focus:border-neutral-950"
-          />
           <button
             type="button"
             className="h-10 rounded bg-neutral-950 px-3 text-sm font-semibold text-white disabled:cursor-not-allowed disabled:opacity-50"
@@ -653,11 +1041,10 @@ export function BoardClient() {
           />
           <button
             type="button"
-            className="h-10 rounded bg-[#0f766e] px-4 text-sm font-semibold text-white disabled:cursor-not-allowed disabled:opacity-50"
-            onClick={generate}
-            disabled={generationState === 'generating'}
+            className="h-10 rounded bg-[#0f766e] px-4 text-sm font-semibold text-white"
+            onClick={() => setChatPanelOpen(true)}
           >
-            Generate
+            Open chat
           </button>
           {session ? (
             <>
@@ -748,13 +1135,29 @@ export function BoardClient() {
               const text = window.prompt('Note', 'sun-bleached, intimate, tactile')
               if (text) {
                 createAtViewportCenter({
-                  type: 'note',
+                  type: 'moodboard-note',
                   props: { text, w: 250, h: 150 },
                 })
               }
             }}
           >
             Note
+          </button>
+          <button
+            type="button"
+            className={`h-9 rounded border px-3 text-sm font-semibold ${
+              commentMode ? 'border-[#0f766e] bg-[#0f766e] text-white' : 'border-neutral-300 bg-white'
+            }`}
+            onClick={() => setCommentMode((current) => !current)}
+          >
+            Comment
+          </button>
+          <button
+            type="button"
+            className="h-9 rounded border border-neutral-300 bg-white px-3 text-sm font-semibold"
+            onClick={() => setShowResolvedComments((current) => !current)}
+          >
+            {showResolvedComments ? 'Hide resolved' : 'Show resolved'}
           </button>
           {importState === 'importing' ? <span className="text-sm text-neutral-600">Importing...</span> : null}
           {session ? <span className="text-sm text-neutral-600">{saveState}</span> : null}
@@ -764,69 +1167,90 @@ export function BoardClient() {
       </header>
 
       <section className="flex min-h-0 flex-1">
-        <aside className="flex w-80 shrink-0 flex-col gap-3 overflow-y-auto border-r border-neutral-950/10 bg-[#fbfaf6] p-3">
-          <div>
-            <h2 className="m-0 text-sm font-semibold">Sources</h2>
-            <p className="m-0 mt-1 text-xs text-neutral-500">Full images stay here. Extract cutouts to compose.</p>
-          </div>
-          {sources.length ? (
-            sources.map((source) => {
-              const busy = extractionState?.sourceId === source.id
-              return (
-                <div key={source.id} className="rounded border border-neutral-300 bg-white p-2">
-                  {/* eslint-disable-next-line @next/next/no-img-element */}
-                  <img src={source.url} alt="" className="aspect-video w-full rounded object-cover" />
-                  <div className="mt-2 grid gap-2">
-                    <button
-                      type="button"
-                      className="h-9 rounded bg-neutral-950 px-3 text-sm font-semibold text-white disabled:opacity-50"
-                      disabled={busy}
-                      onClick={() => void extractSource(source, 'subject')}
-                    >
-                      {busy && extractionState?.action === 'subject' ? 'Extracting...' : 'Extract subject'}
-                    </button>
-                    <div className="flex gap-2">
-                      <input
-                        value={extractPrompts[source.id] ?? ''}
-                        onChange={(event) =>
-                          setExtractPrompts((current) => ({ ...current, [source.id]: event.target.value }))
-                        }
-                        placeholder="the chair"
-                        className="min-w-0 flex-1 rounded border border-neutral-300 px-2 text-sm outline-none focus:border-neutral-950"
-                      />
+        {sourcesOpen ? (
+          <aside className="flex w-80 shrink-0 flex-col gap-3 overflow-y-auto border-r border-neutral-950/10 bg-[#fbfaf6] p-3">
+            <div className="flex items-start justify-between gap-3">
+              <div>
+                <h2 className="m-0 text-sm font-semibold">Sources</h2>
+                <p className="m-0 mt-1 text-xs text-neutral-500">Full images stay here. Extract cutouts to compose.</p>
+              </div>
+              <button
+                type="button"
+                className="h-8 rounded border border-neutral-300 bg-white px-2 text-xs font-semibold"
+                onClick={() => setSourcesOpen(false)}
+              >
+                Hide
+              </button>
+            </div>
+            {sources.length ? (
+              sources.map((source) => {
+                const busy = extractionState?.sourceId === source.id
+                return (
+                  <div key={source.id} className="rounded border border-neutral-300 bg-white p-2">
+                    {/* eslint-disable-next-line @next/next/no-img-element */}
+                    <img src={source.url} alt="" className="aspect-video w-full rounded object-cover" />
+                    <div className="mt-2 grid gap-2">
                       <button
                         type="button"
-                        className="rounded border border-neutral-300 px-2 text-sm font-semibold disabled:opacity-50"
+                        className="h-9 rounded bg-neutral-950 px-3 text-sm font-semibold text-white disabled:opacity-50"
                         disabled={busy}
-                        onClick={() => void extractSource(source, 'describe')}
+                        onClick={() => void extractSource(source, 'subject')}
                       >
-                        Extract
+                        {busy && extractionState?.action === 'subject' ? 'Extracting...' : 'Extract subject'}
+                      </button>
+                      <div className="flex gap-2">
+                        <input
+                          value={extractPrompts[source.id] ?? ''}
+                          onChange={(event) =>
+                            setExtractPrompts((current) => ({ ...current, [source.id]: event.target.value }))
+                          }
+                          placeholder="the chair"
+                          className="min-w-0 flex-1 rounded border border-neutral-300 px-2 text-sm outline-none focus:border-neutral-950"
+                        />
+                        <button
+                          type="button"
+                          className="rounded border border-neutral-300 px-2 text-sm font-semibold disabled:opacity-50"
+                          disabled={busy}
+                          onClick={() => void extractSource(source, 'describe')}
+                        >
+                          Extract
+                        </button>
+                      </div>
+                      <button
+                        type="button"
+                        className="h-9 rounded border border-neutral-300 px-3 text-sm font-semibold disabled:opacity-50"
+                        disabled={busy}
+                        onClick={() => void extractPalette(source)}
+                      >
+                        {busy && extractionState?.action === 'palette' ? 'Extracting...' : 'Extract palette'}
                       </button>
                     </div>
-                    <button
-                      type="button"
-                      className="h-9 rounded border border-neutral-300 px-3 text-sm font-semibold disabled:opacity-50"
-                      disabled={busy}
-                      onClick={() => void extractPalette(source)}
-                    >
-                      {busy && extractionState?.action === 'palette' ? 'Extracting...' : 'Extract palette'}
-                    </button>
                   </div>
-                </div>
-              )
-            })
-          ) : (
-            <p className="m-0 rounded border border-dashed border-neutral-300 p-3 text-sm text-neutral-500">
-              Upload, paste a URL, or use the clipboard to add source images.
-            </p>
-          )}
-        </aside>
+                )
+              })
+            ) : (
+              <p className="m-0 rounded border border-dashed border-neutral-300 p-3 text-sm text-neutral-500">
+                Upload, paste a URL, or use the clipboard to add source images.
+              </p>
+            )}
+          </aside>
+        ) : (
+          <button
+            type="button"
+            className="flex w-11 shrink-0 items-center justify-center border-r border-neutral-950/10 bg-[#fbfaf6] text-xs font-semibold text-neutral-700"
+            aria-label="Show sources"
+            onClick={() => setSourcesOpen(true)}
+          >
+            <span className="-rotate-90 whitespace-nowrap">Sources</span>
+          </button>
+        )}
 
         <div className="relative min-w-0 flex-1">
-          <div className="absolute inset-0">
+          <div className={`absolute inset-0 ${showResolvedComments ? '' : 'hide-resolved-comments'}`}>
             <Tldraw
               key={boardRecord?.id ?? 'anonymous'}
               licenseKey={tldrawLicenseKey}
+              components={tldrawComponents}
               shapeUtils={shapeUtils}
               snapshot={tldrawSnapshot}
               onMount={(editor) => {
@@ -851,6 +1275,14 @@ export function BoardClient() {
                 }
               }}
             />
+            {commentMode ? (
+              <button
+                type="button"
+                className="absolute inset-0 z-50 cursor-crosshair border-0 bg-transparent p-0"
+                aria-label="Drop comment"
+                onClick={(event) => dropCommentAtScreenPoint({ x: event.clientX, y: event.clientY })}
+              />
+            ) : null}
           </div>
         </div>
       </section>
@@ -878,7 +1310,8 @@ export function BoardClient() {
                     <span className="text-xs font-medium text-red-700">{output.error}</span>
                     <button
                       type="button"
-                      className="rounded bg-neutral-950 px-3 py-1.5 text-xs font-semibold text-white"
+                      className="rounded bg-neutral-950 px-3 py-1.5 text-xs font-semibold text-white disabled:cursor-not-allowed disabled:opacity-50"
+                      disabled={generationState === 'generating'}
                       onClick={(event) => {
                         event.stopPropagation()
                         void generate()
@@ -921,27 +1354,250 @@ export function BoardClient() {
           )}
         </div>
 
-        {promptPreview ? (
-          <div className="min-w-[320px] max-w-[620px] border-l border-neutral-950/10 pl-4">
-            <div className="mb-2 flex flex-wrap items-center gap-2">
-              <span className="text-xs font-semibold uppercase text-neutral-500">
-                Palette: {promptPreview.paletteSource}
-              </span>
-              {promptPreview.palette.map((color) => (
-                <span
-                  key={color}
-                  className="h-5 w-8 rounded border border-neutral-950/20"
-                  title={color}
-                  style={{ backgroundColor: color }}
-                />
-              ))}
+        {selectedOutput ? (
+          <div className="min-w-[360px] max-w-[460px] border-l border-neutral-950/10 pl-4">
+            <div className="mb-2 flex items-center justify-between gap-2">
+              <span className="text-xs font-semibold uppercase text-neutral-500">Compose text</span>
+              <span className="text-xs text-neutral-500">Output {selectedOutput.slot + 1}</span>
             </div>
-            <p className="m-0 max-h-28 overflow-y-auto text-sm leading-snug text-neutral-700">
-              {promptPreview.prompt}
-            </p>
+            <div className="grid grid-cols-2 gap-2">
+              <input
+                value={composeHeadline}
+                onChange={(event) => setComposeHeadline(event.target.value)}
+                placeholder="Headline"
+                maxLength={120}
+                className="col-span-2 h-9 rounded border border-neutral-300 bg-white px-3 text-sm outline-none transition focus:border-neutral-950"
+              />
+              <input
+                value={composeFontName}
+                onChange={(event) => {
+                  setComposeFontName(event.target.value)
+                  if (event.target.value.trim()) setComposeFontUrl('')
+                }}
+                placeholder="Google font"
+                className="h-9 rounded border border-neutral-300 bg-white px-3 text-sm outline-none transition focus:border-neutral-950"
+              />
+              <input
+                value={composeFontUrl}
+                onChange={(event) => {
+                  setComposeFontUrl(event.target.value)
+                  if (event.target.value.trim()) setComposeFontName('')
+                }}
+                placeholder="Font URL"
+                className="h-9 rounded border border-neutral-300 bg-white px-3 text-sm outline-none transition focus:border-neutral-950"
+              />
+              <input
+                type="number"
+                min={100}
+                max={900}
+                step={100}
+                value={composeFontWeight}
+                onChange={(event) => setComposeFontWeight(Number(event.target.value))}
+                className="h-9 rounded border border-neutral-300 bg-white px-3 text-sm outline-none transition focus:border-neutral-950"
+                title="Font weight"
+              />
+              <div className="flex h-9 overflow-hidden rounded border border-neutral-300 bg-white">
+                <input
+                  type="color"
+                  value={composeColor}
+                  onChange={(event) => setComposeColor(event.target.value)}
+                  className="h-full w-12 border-0 bg-white p-1"
+                  title="Text color"
+                />
+                <input
+                  type="range"
+                  min={0.02}
+                  max={0.5}
+                  step={0.01}
+                  value={composeFontSizeRatio}
+                  onChange={(event) => setComposeFontSizeRatio(Number(event.target.value))}
+                  className="min-w-0 flex-1 px-2"
+                  title="Font size"
+                />
+              </div>
+            </div>
+            <div className="mt-2 flex items-center gap-3">
+              <div className="grid grid-cols-3 gap-1">
+                {COMPOSE_POSITIONS.map((position) => (
+                  <button
+                    key={position.id}
+                    type="button"
+                    className={`h-7 w-9 rounded border text-[10px] font-semibold ${
+                      composePosition === position.id
+                        ? 'border-[#0f766e] bg-[#0f766e] text-white'
+                        : 'border-neutral-300 bg-white text-neutral-700'
+                    }`}
+                    title={position.id}
+                    aria-pressed={composePosition === position.id}
+                    onClick={() => setComposePosition(position.id)}
+                  >
+                    {position.label}
+                  </button>
+                ))}
+              </div>
+              <label className="flex items-center gap-2 text-xs font-semibold text-neutral-600">
+                <input
+                  type="checkbox"
+                  checked={composeOutline}
+                  onChange={(event) => setComposeOutline(event.target.checked)}
+                />
+                Outline
+              </label>
+              <input
+                type="color"
+                value={composeOutlineColor}
+                onChange={(event) => setComposeOutlineColor(event.target.value)}
+                disabled={!composeOutline}
+                className="h-8 w-10 rounded border border-neutral-300 bg-white p-1 disabled:opacity-40"
+                title="Outline color"
+              />
+            </div>
+            <button
+              type="button"
+              className="mt-2 h-9 w-full rounded bg-neutral-950 px-3 text-sm font-semibold text-white disabled:cursor-not-allowed disabled:opacity-50"
+              disabled={composingState === 'composing' || !selectedOutput.url}
+              onClick={composeTextOnOutput}
+            >
+              {composingState === 'composing' ? 'Composing...' : 'Add text'}
+            </button>
           </div>
         ) : null}
+
       </aside>
+
+      {chatPanelOpen ? (
+        <section className="fixed bottom-5 right-5 z-[100] flex h-[560px] max-h-[calc(100vh-7rem)] w-[380px] max-w-[calc(100vw-2.5rem)] flex-col overflow-hidden rounded-lg border border-neutral-950/10 bg-white shadow-2xl">
+          <div className="flex items-center justify-between gap-3 bg-[#0f766e] px-4 py-3 text-white">
+            <div className="min-w-0">
+              <h2 className="m-0 truncate text-base font-semibold">Generate chat</h2>
+              <p className="m-0 mt-0.5 truncate text-xs text-white/75">
+                {chatState === 'idle' ? 'Use the board as context' : 'Generating with current references'}
+              </p>
+            </div>
+            <button
+              type="button"
+              className="flex h-8 w-8 shrink-0 items-center justify-center rounded border border-white/25 text-lg font-semibold text-white"
+              aria-label="Close chat"
+              onClick={() => setChatPanelOpen(false)}
+            >
+              x
+            </button>
+          </div>
+
+          <div className="min-h-0 flex-1 overflow-y-auto bg-[#fbfaf6] px-4 py-3">
+            {chatMessages.length ? (
+              <div className="space-y-3">
+                {chatMessages.map((message) => (
+                  <div
+                    key={message.id}
+                    className={`flex ${message.role === 'user' ? 'justify-end' : 'justify-start'}`}
+                  >
+                    <div
+                      className={`max-w-[88%] rounded-lg px-3 py-2 text-sm shadow-sm ${
+                        message.role === 'user'
+                          ? 'bg-neutral-950 text-white'
+                          : 'border border-neutral-200 bg-white text-neutral-900'
+                      }`}
+                    >
+                      <p className="m-0 whitespace-pre-wrap leading-snug">{message.content}</p>
+                      {message.status === 'generating' && !message.images?.length ? (
+                        <p className="m-0 mt-2 text-xs opacity-70">Generating images...</p>
+                      ) : null}
+                      {message.images?.length ? (
+                        <div className="mt-3 grid gap-2">
+                          {message.images.map((image) => (
+                            <div key={image.url} className="overflow-hidden rounded border border-neutral-200 bg-white">
+                              {/* eslint-disable-next-line @next/next/no-img-element */}
+                              <img src={image.url} alt="" className="aspect-square w-full object-cover" />
+                              <button
+                                type="button"
+                                className="h-9 w-full border-t border-neutral-200 bg-[#0f766e] px-3 text-sm font-semibold text-white"
+                                onClick={() =>
+                                  createElementAtPoint({
+                                    imageUrl: image.url,
+                                    label: 'chat output',
+                                    sourceId: 'chat',
+                                    width: image.width,
+                                    height: image.height,
+                                  })
+                                }
+                              >
+                                Add to board
+                              </button>
+                            </div>
+                          ))}
+                        </div>
+                      ) : null}
+                      {message.status === 'error' ? (
+                        <p className="m-0 mt-2 text-xs font-semibold text-red-700">Failed</p>
+                      ) : null}
+                    </div>
+                  </div>
+                ))}
+              </div>
+            ) : (
+              <div className="flex h-full items-center justify-center text-center">
+                <p className="m-0 max-w-[260px] text-sm text-neutral-500">
+                  Tell the board what to generate. Current elements, swatches, notes, and type samples are included.
+                </p>
+              </div>
+            )}
+          </div>
+
+          <form
+            className="border-t border-neutral-200 bg-white p-3"
+            onSubmit={(event) => {
+              event.preventDefault()
+              void sendChatMessage()
+            }}
+          >
+            <div className="flex items-end gap-2">
+              <textarea
+                value={chatInput}
+                onChange={(event) => setChatInput(event.target.value)}
+                onKeyDown={(event) => {
+                  if (event.key === 'Enter' && !event.shiftKey) {
+                    event.preventDefault()
+                    void sendChatMessage()
+                  }
+                }}
+                placeholder="Describe the next image"
+                rows={2}
+                className="min-h-12 flex-1 resize-none rounded border border-neutral-300 bg-white px-3 py-2 text-sm outline-none transition focus:border-neutral-950"
+              />
+              <button
+                type="submit"
+                className="h-12 rounded bg-neutral-950 px-4 text-sm font-semibold text-white disabled:cursor-not-allowed disabled:opacity-50"
+                disabled={!chatInput.trim() || chatState !== 'idle'}
+              >
+                Send
+              </button>
+            </div>
+          </form>
+        </section>
+      ) : (
+        <button
+          type="button"
+          className="fixed bottom-5 right-5 z-[100] flex h-16 w-16 items-center justify-center rounded-full bg-[#0f766e] text-white shadow-2xl ring-8 ring-[#0f766e]/10"
+          aria-label="Open chat"
+          onClick={() => setChatPanelOpen(true)}
+        >
+          <svg
+            viewBox="0 0 24 24"
+            aria-hidden="true"
+            className="h-8 w-8"
+            fill="none"
+            stroke="currentColor"
+            strokeLinecap="round"
+            strokeLinejoin="round"
+            strokeWidth="2.2"
+          >
+            <path d="M21 11.5a8.4 8.4 0 0 1-9 8.3 8.8 8.8 0 0 1-3.9-.9L3 20l1.2-4.4A8 8 0 0 1 3 11.5C3 6.8 7 3 12 3s9 3.8 9 8.5Z" />
+            <path d="M8 10h8" />
+            <path d="M8 14h5" />
+          </svg>
+        </button>
+      )}
     </main>
   )
 }

@@ -1,5 +1,6 @@
 'use client'
 
+import { type SyntheticEvent, useState } from 'react'
 import {
   HTMLContainer,
   Rectangle2d,
@@ -55,11 +56,28 @@ export type TypeSampleShape = TLBaseShape<
 >
 
 export type NoteShape = TLBaseShape<
-  'note',
+  'moodboard-note',
   {
     text: string
     w: number
     h: number
+  }
+>
+
+export type CommentReply = {
+  author: string
+  text: string
+  createdAt: string
+}
+
+export type CommentPinShape = TLBaseShape<
+  'comment-pin',
+  {
+    author: string
+    text: string
+    replies: CommentReply[]
+    resolved: boolean
+    createdAt: string
   }
 >
 
@@ -69,7 +87,8 @@ declare module 'tldraw' {
     element: ElementShape['props']
     swatch: SwatchShape['props']
     'type-sample': TypeSampleShape['props']
-    note: NoteShape['props']
+    'moodboard-note': NoteShape['props']
+    'comment-pin': CommentPinShape['props']
   }
 }
 
@@ -329,7 +348,7 @@ export class TypeSampleShapeUtil extends ShapeUtil<TypeSampleShape> {
 }
 
 export class NoteShapeUtil extends ShapeUtil<NoteShape> {
-  static override type = 'note' as const
+  static override type = 'moodboard-note' as const
   static override props = {
     text: T.string,
     w: T.number,
@@ -367,10 +386,167 @@ export class NoteShapeUtil extends ShapeUtil<NoteShape> {
   }
 }
 
+export class CommentPinShapeUtil extends ShapeUtil<CommentPinShape> {
+  static override type = 'comment-pin' as const
+  static override props = {
+    author: T.string,
+    text: T.string,
+    replies: T.arrayOf(
+      T.object({
+        author: T.string,
+        text: T.string,
+        createdAt: T.string,
+      })
+    ),
+    resolved: T.boolean,
+    createdAt: T.string,
+  }
+
+  getDefaultProps(): CommentPinShape['props'] {
+    return {
+      author: 'Anonymous',
+      text: '',
+      replies: [],
+      resolved: false,
+      createdAt: new Date().toISOString(),
+    }
+  }
+
+  override canResize() {
+    return false
+  }
+
+  getGeometry() {
+    return new Rectangle2d({ width: 28, height: 28, isFilled: true })
+  }
+
+  component(shape: CommentPinShape) {
+    return <CommentPin editor={this.editor} shape={shape} />
+  }
+
+  getIndicatorPath() {
+    const path = new Path2D()
+    path.arc(14, 14, 14, 0, Math.PI * 2)
+    return path
+  }
+}
+
+function CommentPin({ editor, shape }: { editor: Editor; shape: CommentPinShape }) {
+  const [open, setOpen] = useState(!shape.props.text)
+  const [draft, setDraft] = useState(shape.props.text)
+  const [reply, setReply] = useState('')
+  const resolved = shape.props.resolved
+
+  const updateProps = (props: Partial<CommentPinShape['props']>) => {
+    editor.updateShape<CommentPinShape>({
+      id: shape.id,
+      type: 'comment-pin',
+      props,
+    })
+  }
+  const handleUiEvent = (event: SyntheticEvent) => {
+    editor.markEventAsHandled(event)
+    event.stopPropagation()
+  }
+
+  return (
+    <HTMLContainer
+      className="comment-pin pointer-events-auto overflow-visible"
+      data-resolved={resolved ? 'true' : 'false'}
+      onPointerDown={handleUiEvent}
+      onPointerUp={handleUiEvent}
+      onClick={handleUiEvent}
+      onKeyDown={handleUiEvent}
+    >
+      <button
+        type="button"
+        className={`pointer-events-auto flex h-7 w-7 items-center justify-center rounded-full border-2 text-xs font-bold shadow ${
+          resolved ? 'border-neutral-400 bg-neutral-200 text-neutral-500' : 'border-white bg-[#0f766e] text-white'
+        }`}
+        onClick={() => setOpen((current) => !current)}
+      >
+        {resolved ? 'OK' : shape.props.replies.length + 1}
+      </button>
+      {open ? (
+        <div className="pointer-events-auto absolute left-8 top-0 z-50 w-72 rounded border border-neutral-300 bg-white p-3 text-neutral-950 shadow-xl">
+          <div className="mb-2 flex items-center justify-between gap-2">
+            <span className="truncate text-xs font-semibold text-neutral-500">{shape.props.author}</span>
+            <button
+              type="button"
+              className="pointer-events-auto rounded border border-neutral-300 px-2 py-1 text-xs font-semibold"
+              onClick={() => updateProps({ resolved: !resolved })}
+            >
+              {resolved ? 'Reopen' : 'Resolve'}
+            </button>
+          </div>
+          {shape.props.text ? (
+            <p className="m-0 whitespace-pre-wrap text-sm leading-snug">{shape.props.text}</p>
+          ) : (
+            <textarea
+              value={draft}
+              onChange={(event) => setDraft(event.target.value)}
+              placeholder="Comment"
+              className="pointer-events-auto h-20 w-full resize-none rounded border border-neutral-300 px-2 py-1 text-sm outline-none focus:border-neutral-950"
+            />
+          )}
+          {shape.props.replies.length ? (
+            <div className="mt-3 space-y-2 border-t border-neutral-200 pt-2">
+              {shape.props.replies.map((item) => (
+                <div key={`${item.createdAt}-${item.author}`}>
+                  <div className="text-xs font-semibold text-neutral-500">{item.author}</div>
+                  <p className="m-0 whitespace-pre-wrap text-sm leading-snug">{item.text}</p>
+                </div>
+              ))}
+            </div>
+          ) : null}
+          {shape.props.text ? (
+            <div className="mt-3 flex gap-2">
+              <input
+                value={reply}
+                onChange={(event) => setReply(event.target.value)}
+                placeholder="Reply"
+                className="pointer-events-auto min-w-0 flex-1 rounded border border-neutral-300 px-2 py-1 text-sm outline-none focus:border-neutral-950"
+              />
+              <button
+                type="button"
+                className="pointer-events-auto rounded bg-neutral-950 px-2 py-1 text-xs font-semibold text-white disabled:opacity-50"
+                disabled={!reply.trim()}
+                onClick={() => {
+                  const text = reply.trim()
+                  if (!text) return
+                  updateProps({
+                    replies: [
+                      ...shape.props.replies,
+                      { author: shape.props.author, text, createdAt: new Date().toISOString() },
+                    ],
+                  })
+                  setReply('')
+                }}
+              >
+                Reply
+              </button>
+            </div>
+          ) : (
+            <button
+              type="button"
+              className="pointer-events-auto mt-2 h-8 w-full rounded bg-neutral-950 px-2 text-xs font-semibold text-white disabled:opacity-50"
+              disabled={!draft.trim()}
+              onClick={() => updateProps({ text: draft.trim() })}
+            >
+              Save comment
+            </button>
+          )}
+        </div>
+      ) : null}
+    </HTMLContainer>
+  )
+}
+
 export const moodboardShapeUtils = [
   ImageRefShapeUtil,
   ElementShapeUtil,
   SwatchShapeUtil,
   TypeSampleShapeUtil,
   NoteShapeUtil,
+  CommentPinShapeUtil,
 ]

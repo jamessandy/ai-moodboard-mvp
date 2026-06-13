@@ -14,10 +14,28 @@ export type SourceImage = {
   url: string
 }
 
+export type ChatImage = {
+  url: string
+  width?: number
+  height?: number
+  seed?: number
+}
+
+export type ChatMessage = {
+  id: string
+  role: 'user' | 'assistant'
+  content: string
+  createdAt: string
+  generationPrompt?: string
+  images?: ChatImage[]
+  status?: 'thinking' | 'generating' | 'done' | 'error'
+}
+
 export type MoodboardDocument = {
   version: 2
   sources: SourceImage[]
   tldraw: unknown
+  chat?: ChatMessage[]
 }
 
 export interface CompiledRequest {

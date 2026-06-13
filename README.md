@@ -6,6 +6,7 @@ Working MVP for a reference-driven AI moodboard. The current model is sources ->
 
 ```bash
 FAL_KEY=
+GOOGLE_FONTS_API_KEY=
 NEXT_PUBLIC_SUPABASE_URL=
 NEXT_PUBLIC_SUPABASE_ANON_KEY=
 SUPABASE_SERVICE_ROLE_KEY=
@@ -22,6 +23,7 @@ EXTRACTION_TIMEOUT_MS=180000
 ```
 
 `SUPABASE_SERVICE_ROLE_KEY` is server-only and must not be exposed to the browser.
+`GOOGLE_FONTS_API_KEY` is optional and only needed to resolve fonts by Google Fonts family name. Direct `.ttf`, `.otf`, and `.woff` font URLs work without it.
 Set `NEXT_PUBLIC_TLDRAW_LICENSE_KEY` before public deploy to remove the production license watermark.
 
 ## Supabase setup.
@@ -102,15 +104,17 @@ Round 3 acceptance:
 - Extract palette from a source to create a `swatch`.
 - Add type samples and notes to the board.
 - Toggle tag chips on elements.
-- Write a one-line brief above the canvas.
-- Click Generate to run 6 concurrent fal.ai generations through `POST /api/generate`.
+- Open Chat and send an instruction to run 6 concurrent fal.ai generations through `POST /api/generate`.
 - Watch outputs fill the tray progressively as each generation resolves.
-- Select a finished tray image or use its visible Add to board button to add it as a taggable `element`.
+- Use Add to board on a chat image to add it as a taggable `element`.
 - Drag a finished tray image onto the board as a secondary convenience path.
+- Select a finished tray image, enter a headline and either a Google Fonts name or direct `.ttf`/`.otf`/`.woff` URL, then click Add text to append a composited output to the tray.
 - Swatch colors are injected directly into the assembled prompt.
 - Element cutout URLs are sent as generation references.
 - Users can request a Supabase magic link with the Save login control.
 - Logged-in users get one persisted board that autosaves the serialized tldraw document and brief.
+- The floating Chat widget turns conversational instructions into generation prompts, streams generated images into the thread, and can add any chat image back to the board.
+- Comment mode drops persisted `comment-pin` shapes on the canvas with replies, resolve controls, and a resolved-comment filter.
 - The Share control copies `/b/[share_id]`.
 - Shared pages render the persisted tldraw document read-only, without edit controls or generation.
 
@@ -134,6 +138,22 @@ Round 3 acceptance:
 
 The response is newline-delimited JSON. Each generated fal.ai image is fetched server-side, stored in `moodboard-outputs`, then streamed to the client as an `output` event with the Supabase Storage URL. The route enforces a server-side generation cap per local board id with `MAX_GENERATIONS_PER_BOARD`, defaulting to 40.
 It also enforces an in-memory per-user/IP cap and request rate limit with the env vars above. For a multi-instance deployment, move those counters to durable storage.
+
+## Compose text
+
+After generation, select an output in the tray and use the Compose text controls to render exact headline text onto the image. Font names are resolved through the Google Fonts Developer API when `GOOGLE_FONTS_API_KEY` is set; direct `.ttf`, `.otf`, and `.woff` URLs work without a key. The image model is not asked to draw text: the server parses the real font with `opentype.js`, converts the glyphs to SVG paths, composites them over the selected PNG with `sharp`, stores the result in `moodboard-outputs`, and adds the new image to the tray.
+
+Use fonts you are licensed to use. Google Fonts families are generally safe for this flow because they are served under open licenses such as OFL or Apache.
+
+## Conversational generation
+
+The floating Chat widget sends the current conversation plus a summary of the board to `POST /api/chat`. The route uses local app logic to turn recent user messages into a generation direction; there is no extra LLM provider or API key in this version. The client then reuses `POST /api/generate` with that prompt and the current board references, so the assembler, fal.ai model, storage, and add-to-board flow stay shared.
+
+Chat history is saved inside the board document as `chat`, alongside `sources` and `tldraw`, and reloads with the board.
+
+## Comments
+
+The Comment toolbar toggle enables click-to-drop canvas comments. Each comment is a custom tldraw `comment-pin` shape with `{ author, text, replies, resolved, createdAt }`, so comments persist through the existing tldraw snapshot autosave. Resolved pins render dimmed and can be hidden with the resolved-comment filter.
 
 ## Extraction routes
 

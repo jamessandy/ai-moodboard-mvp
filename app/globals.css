@@ -28,3 +28,7 @@ body {
 .tl-container {
   --color-background: #fbfaf6;
 }
+
+.hide-resolved-comments .comment-pin[data-resolved='true'] {
+  display: none;
+}
