@@ -4,9 +4,11 @@ import { ChangeEvent, useCallback, useEffect, useMemo, useRef, useState } from '
 import { Session } from '@supabase/supabase-js'
 import { AssetRecordType, Editor, Tldraw, TLEditorSnapshot, TLComponents, TLStoreSnapshot } from 'tldraw'
 import { moodboardShapeUtils } from '@/components/moodboardShapes'
+import { captureClientEvent } from '@/lib/analytics/client'
 import { BoardDoc, ChatMessage, SourceImage, cleanHexColors, cleanTags, isMoodboardDocument } from '@/lib/board'
 import { StoredBoard } from '@/lib/boards'
 import { createBrowserSupabaseClient } from '@/lib/supabase/client'
+import { IMAGES_PER_GENERATION } from '@/lib/usage-constants'
 
 type ImportState = 'idle' | 'importing'
 type GenerationState = 'idle' | 'generating'
@@ -28,10 +30,16 @@ type PromptPreview = {
   paletteSource: 'none' | 'swatch' | 'extracted'
 }
 type SaveState = 'idle' | 'loading' | 'saving' | 'saved' | 'error'
+type AuthMode = 'login' | 'signup'
 type ExtractionState = {
   sourceId: string
   action: 'subject' | 'describe' | 'palette'
 } | null
+type UsageQuota = {
+  imagesUsed: number
+  imageLimit: number
+  imagesRemaining: number
+}
 
 const DEFAULT_SWATCHES = [
   ['#111827', '#f97316', '#f8fafc'],
@@ -56,6 +64,21 @@ function randomFrom<T>(items: T[]) {
 
 function isInvalidRefreshTokenError(error: unknown) {
   return error instanceof Error && /invalid refresh token|refresh token.*already used|already used/i.test(error.message)
+}
+
+function isLikelyNewAuthUser(session: Session) {
+  const createdAt = Date.parse(session.user.created_at)
+  const lastSignInAt = Date.parse(session.user.last_sign_in_at ?? '')
+  if (!Number.isFinite(createdAt) || !Number.isFinite(lastSignInAt)) return false
+
+  return Math.abs(lastSignInAt - createdAt) < 10_000
+}
+
+function getAuthMethod(session: Session, pendingMethod: string | null) {
+  if (pendingMethod) return pendingMethod
+
+  const provider = session.user.app_metadata.provider
+  return typeof provider === 'string' ? provider : 'oauth_or_magic_link'
 }
 
 function getStoredChatMessages(document: unknown): ChatMessage[] {
@@ -121,6 +144,7 @@ export function BoardClient() {
   const fileInputRef = useRef<HTMLInputElement | null>(null)
   const saveTimerRef = useRef<ReturnType<typeof setTimeout> | null>(null)
   const sessionRef = useRef<Session | null>(null)
+  const pendingAuthMethodRef = useRef<string | null>(null)
   const boardRef = useRef<StoredBoard | null>(null)
   const initialSnapshotRef = useRef<TLEditorSnapshot | TLStoreSnapshot | undefined>(undefined)
   const suppressSaveRef = useRef(false)
@@ -139,8 +163,15 @@ export function BoardClient() {
   const [showResolvedComments, setShowResolvedComments] = useState(true)
   const [extractPrompts, setExtractPrompts] = useState<Record<string, string>>({})
   const [extractionState, setExtractionState] = useState<ExtractionState>(null)
-  const [email, setEmail] = useState('')
+  const [authReady, setAuthReady] = useState(false)
+  const [authMode, setAuthMode] = useState<AuthMode>('login')
+  const [authEmail, setAuthEmail] = useState('')
+  const [authPassword, setAuthPassword] = useState('')
+  const [authConfirmPassword, setAuthConfirmPassword] = useState('')
+  const [authSubmitting, setAuthSubmitting] = useState(false)
+  const [authMessage, setAuthMessage] = useState<string | null>(null)
   const [session, setSession] = useState<Session | null>(null)
+  const [quota, setQuota] = useState<UsageQuota | null>(null)
   const [boardRecord, setBoardRecord] = useState<StoredBoard | null>(null)
   const [saveState, setSaveState] = useState<SaveState>('idle')
   const [shareMessage, setShareMessage] = useState<string | null>(null)
@@ -166,6 +197,8 @@ export function BoardClient() {
     () => outputs.find((output) => output.slot === selectedOutputSlot && output.status === 'done' && output.url),
     [outputs, selectedOutputSlot]
   )
+  const canGenerate = Boolean(quota && quota.imagesRemaining >= IMAGES_PER_GENERATION)
+  const quotaBlocked = Boolean(quota && quota.imagesRemaining < IMAGES_PER_GENERATION)
 
   const isTldrawSnapshot = (document: unknown) =>
     Boolean(document && typeof document === 'object' && 'store' in document && 'schema' in document)
@@ -196,6 +229,7 @@ export function BoardClient() {
     boardRef.current = null
     initialSnapshotRef.current = undefined
     setBoardRecord(null)
+    setQuota(null)
     chatMessagesRef.current = []
     setChatMessages([])
     setSaveState('idle')
@@ -239,12 +273,53 @@ export function BoardClient() {
     [applyStoredBoard]
   )
 
+  const loadQuota = useCallback(async (nextSession: Session) => {
+    try {
+      const response = await fetch('/api/profile', {
+        headers: {
+          authorization: `Bearer ${nextSession.access_token}`,
+        },
+      })
+      const result = (await response.json()) as Partial<UsageQuota> & { error?: string }
+
+      if (!response.ok || typeof result.imagesRemaining !== 'number') {
+        throw new Error(result.error ?? 'Could not load image quota.')
+      }
+
+      setQuota({
+        imagesUsed: result.imagesUsed ?? 0,
+        imageLimit: result.imageLimit ?? 10,
+        imagesRemaining: result.imagesRemaining,
+      })
+    } catch (caught) {
+      const message = caught instanceof Error ? caught.message : 'Could not load image quota.'
+      setError(message)
+    }
+  }, [])
+
+  const loadAuthenticatedState = useCallback(
+    (nextSession: Session) => {
+      void loadQuota(nextSession)
+      void loadBoard(nextSession)
+    },
+    [loadBoard, loadQuota]
+  )
+
   useEffect(() => {
     const { data } = supabase.auth.onAuthStateChange((event, nextSession) => {
       sessionRef.current = nextSession
       setSession(nextSession)
+      setAuthReady(true)
       if (nextSession) {
-        void loadBoard(nextSession)
+        if (event === 'SIGNED_IN') {
+          const method = getAuthMethod(nextSession, pendingAuthMethodRef.current)
+          if (method !== 'signup' && isLikelyNewAuthUser(nextSession)) {
+            captureClientEvent('signup', { method }, nextSession.user.id)
+          }
+          captureClientEvent('login', { method }, nextSession.user.id)
+          pendingAuthMethodRef.current = null
+        }
+        loadAuthenticatedState(nextSession)
       } else if (event === 'SIGNED_OUT') {
         resetPersistedSession()
       }
@@ -265,7 +340,7 @@ export function BoardClient() {
 
         sessionRef.current = sessionData.session
         setSession(sessionData.session)
-        if (sessionData.session) void loadBoard(sessionData.session)
+        if (sessionData.session) loadAuthenticatedState(sessionData.session)
       })
       .catch((caught) => {
         if (isInvalidRefreshTokenError(caught)) {
@@ -277,11 +352,12 @@ export function BoardClient() {
         const message = caught instanceof Error ? caught.message : 'Could not restore session.'
         setError(message)
       })
+      .finally(() => setAuthReady(true))
 
     return () => {
       data.subscription.unsubscribe()
     }
-  }, [loadBoard, resetPersistedSession, supabase])
+  }, [loadAuthenticatedState, resetPersistedSession, supabase])
 
   const saveBoard = useCallback(async () => {
     const currentSession = sessionRef.current
@@ -361,14 +437,95 @@ export function BoardClient() {
     return next
   }
 
+  const handlePasswordAuth = async () => {
+    const trimmedEmail = authEmail.trim()
+    const password = authPassword
+
+    if (!trimmedEmail || !password) {
+      setError('Enter your email and password.')
+      return
+    }
+
+    if (authMode === 'signup' && password !== authConfirmPassword) {
+      setError('Passwords do not match.')
+      return
+    }
+
+    setError(null)
+    setAuthMessage(null)
+    setAuthSubmitting(true)
+
+    try {
+      if (authMode === 'signup') {
+        const { data, error: signUpError } = await supabase.auth.signUp({
+          email: trimmedEmail,
+          password,
+          options: {
+            emailRedirectTo: window.location.origin,
+          },
+        })
+
+        if (signUpError) throw signUpError
+
+        captureClientEvent('signup', { method: 'password' }, data.user?.id)
+        pendingAuthMethodRef.current = 'signup'
+
+        if (data.session) {
+          await loadQuota(data.session)
+          setAuthMessage('Account created.')
+        } else {
+          setAuthMessage('Check your email to confirm your account, then log in.')
+        }
+        return
+      }
+
+      pendingAuthMethodRef.current = 'password'
+      const { error: signInError } = await supabase.auth.signInWithPassword({
+        email: trimmedEmail,
+        password,
+      })
+
+      if (signInError) throw signInError
+    } catch (caught) {
+      pendingAuthMethodRef.current = null
+      const message = caught instanceof Error ? caught.message : 'Authentication failed.'
+      setError(message)
+    } finally {
+      setAuthSubmitting(false)
+    }
+  }
+
+  const continueWithGoogle = async () => {
+    setError(null)
+    setAuthMessage(null)
+    setAuthSubmitting(true)
+    pendingAuthMethodRef.current = 'google'
+
+    const { error: oauthError } = await supabase.auth.signInWithOAuth({
+      provider: 'google',
+      options: {
+        redirectTo: window.location.origin,
+      },
+    })
+
+    if (oauthError) {
+      pendingAuthMethodRef.current = null
+      setError(oauthError.message)
+      setAuthSubmitting(false)
+    }
+  }
+
   const sendMagicLink = async () => {
-    const trimmed = email.trim()
+    const trimmed = authEmail.trim()
     if (!trimmed) {
       setError('Enter an email for the magic link.')
       return
     }
 
     setError(null)
+    setAuthMessage(null)
+    setAuthSubmitting(true)
+    pendingAuthMethodRef.current = 'magic_link'
     const { error: signInError } = await supabase.auth.signInWithOtp({
       email: trimmed,
       options: {
@@ -377,11 +534,14 @@ export function BoardClient() {
     })
 
     if (signInError) {
+      pendingAuthMethodRef.current = null
       setError(signInError.message)
+      setAuthSubmitting(false)
       return
     }
 
-    setShareMessage('Magic link sent.')
+    setAuthSubmitting(false)
+    setAuthMessage('Magic link sent.')
   }
 
   const signOut = async () => {
@@ -394,6 +554,7 @@ export function BoardClient() {
     const href = `${window.location.origin}/b/${boardRecord.share_id}`
     await navigator.clipboard.writeText(href)
     setShareMessage('Share link copied.')
+    captureClientEvent('share', { board_id: boardRecord.id }, sessionRef.current?.user.id)
   }
 
   const createAtViewportCenter = useCallback((shape: Parameters<Editor['createShape']>[0]) => {
@@ -473,6 +634,14 @@ export function BoardClient() {
         },
       })
       scheduleSave()
+      captureClientEvent(
+        'add_to_board',
+        {
+          source: input.sourceId,
+          label: input.label || 'element',
+        },
+        sessionRef.current?.user.id
+      )
     },
     [scheduleSave]
   )
@@ -542,6 +711,16 @@ export function BoardClient() {
         .filter((note) => note.text),
     }
   }, [brief])
+
+  const updateQuotaFromPayload = (payload: Partial<UsageQuota>) => {
+    if (typeof payload.imagesRemaining !== 'number') return
+
+    setQuota({
+      imagesUsed: payload.imagesUsed ?? Math.max(0, (payload.imageLimit ?? 10) - payload.imagesRemaining),
+      imageLimit: payload.imageLimit ?? 10,
+      imagesRemaining: payload.imagesRemaining,
+    })
+  }
 
   const importImage = useCallback(
     async (payload: { file?: File; url?: string }) => {
@@ -624,6 +803,7 @@ export function BoardClient() {
         width: result.width,
         height: result.height,
       })
+      captureClientEvent('extract', { mode: action }, sessionRef.current?.user.id)
     } catch (caught) {
       const message = caught instanceof Error ? caught.message : 'Extraction failed.'
       setError(message)
@@ -653,6 +833,7 @@ export function BoardClient() {
         props: { colors: result.colors, w: 280, h: 96 },
       })
       scheduleSave()
+      captureClientEvent('extract', { mode: 'palette', color_count: result.colors.length }, sessionRef.current?.user.id)
     } catch (caught) {
       const message = caught instanceof Error ? caught.message : 'Palette extraction failed.'
       setError(message)
@@ -682,23 +863,42 @@ export function BoardClient() {
   }
 
   const generate = async () => {
+    const currentSession = sessionRef.current
+    if (!currentSession) {
+      setError('Log in before generating.')
+      return
+    }
+
+    if (!canGenerate) {
+      setError('You need at least 2 images left to generate.')
+      setOutputs([])
+      return
+    }
+
     setError(null)
     setSelectedOutputSlot(null)
     setGenerationState('generating')
-    setOutputs(Array.from({ length: 6 }, (_, slot) => ({ slot, status: 'pending' })))
+    setOutputs(Array.from({ length: IMAGES_PER_GENERATION }, (_, slot) => ({ slot, status: 'pending' })))
+    let blockedByLimit = false
 
     try {
       const response = await fetch('/api/generate', {
         method: 'POST',
         headers: {
           'Content-Type': 'application/json',
-          ...(sessionRef.current ? { authorization: `Bearer ${sessionRef.current.access_token}` } : {}),
+          authorization: `Bearer ${currentSession.access_token}`,
         },
-        body: JSON.stringify({ boardId: getBoardId(), count: 6, board: getBoardDoc() }),
+        body: JSON.stringify({ boardId: getBoardId(), count: IMAGES_PER_GENERATION, board: getBoardDoc() }),
       })
 
       if (!response.ok || !response.body) {
-        const result = (await response.json().catch(() => null)) as { error?: string } | null
+        const result = (await response.json().catch(() => null)) as
+          | (Partial<UsageQuota> & { error?: string; code?: string; limit_reached?: boolean })
+          | null
+        if (result?.limit_reached || result?.code === 'limit_reached') {
+          blockedByLimit = true
+          updateQuotaFromPayload(result)
+        }
         throw new Error(result?.error ?? 'Generation failed.')
       }
 
@@ -723,10 +923,17 @@ export function BoardClient() {
                 prompt: string
                 palette: string[]
                 paletteSource: PromptPreview['paletteSource']
+                imagesUsed?: number
+                imageLimit?: number
+                imagesRemaining?: number
               }
             | { type: 'output'; slot: number; url: string; width?: number; height?: number; seed: number }
             | { type: 'error'; slot: number; error: string }
-            | { type: 'done' }
+            | { type: 'done'; outputCount?: number; imagesUsed?: number; imageLimit?: number; imagesRemaining?: number }
+
+          if (event.type === 'start' || event.type === 'done') {
+            updateQuotaFromPayload(event)
+          }
 
           if (event.type === 'output') {
             setOutputs((current) =>
@@ -759,9 +966,13 @@ export function BoardClient() {
     } catch (caught) {
       const message = caught instanceof Error ? caught.message : 'Generation failed.'
       setError(message)
-      setOutputs((current) =>
-        current.map((item) => (item.status === 'pending' ? { ...item, status: 'error', error: message } : item))
-      )
+      if (blockedByLimit) {
+        setOutputs([])
+      } else {
+        setOutputs((current) =>
+          current.map((item) => (item.status === 'pending' ? { ...item, status: 'error', error: message } : item))
+        )
+      }
     } finally {
       setGenerationState('idle')
     }
@@ -770,6 +981,18 @@ export function BoardClient() {
   const sendChatMessage = async () => {
     const content = chatInput.trim()
     if (!content || chatState !== 'idle') return
+
+    const currentSession = sessionRef.current
+    if (!currentSession) {
+      setError('Log in before generating.')
+      return
+    }
+
+    if (!canGenerate) {
+      setError('You need at least 2 images left to generate.')
+      setOutputs([])
+      return
+    }
 
     const createdAt = new Date().toISOString()
     const userMessage: ChatMessage = {
@@ -794,6 +1017,7 @@ export function BoardClient() {
     setChatPanelOpen(true)
     setChatState('thinking')
     updateChatMessages(nextMessages)
+    let blockedByLimit = false
 
     try {
       const board = getBoardDoc()
@@ -832,23 +1056,29 @@ export function BoardClient() {
       setChatState('generating')
       setSelectedOutputSlot(null)
       setGenerationState('generating')
-      setOutputs(Array.from({ length: 6 }, (_, slot) => ({ slot, status: 'pending' })))
+      setOutputs(Array.from({ length: IMAGES_PER_GENERATION }, (_, slot) => ({ slot, status: 'pending' })))
 
       const generationResponse = await fetch('/api/generate', {
         method: 'POST',
         headers: {
           'Content-Type': 'application/json',
-          ...(sessionRef.current ? { authorization: `Bearer ${sessionRef.current.access_token}` } : {}),
+          authorization: `Bearer ${currentSession.access_token}`,
         },
         body: JSON.stringify({
           boardId: getBoardId(),
-          count: 6,
+          count: IMAGES_PER_GENERATION,
           board: { ...board, brief: chatResult.generationPrompt },
         }),
       })
 
       if (!generationResponse.ok || !generationResponse.body) {
-        const result = (await generationResponse.json().catch(() => null)) as { error?: string } | null
+        const result = (await generationResponse.json().catch(() => null)) as
+          | (Partial<UsageQuota> & { error?: string; code?: string; limit_reached?: boolean })
+          | null
+        if (result?.limit_reached || result?.code === 'limit_reached') {
+          blockedByLimit = true
+          updateQuotaFromPayload(result)
+        }
         throw new Error(result?.error ?? 'Generation failed.')
       }
 
@@ -873,10 +1103,17 @@ export function BoardClient() {
                 prompt: string
                 palette: string[]
                 paletteSource: PromptPreview['paletteSource']
+                imagesUsed?: number
+                imageLimit?: number
+                imagesRemaining?: number
               }
             | { type: 'output'; slot: number; url: string; width?: number; height?: number; seed: number }
             | { type: 'error'; slot: number; error: string }
-            | { type: 'done' }
+            | { type: 'done'; outputCount?: number; imagesUsed?: number; imageLimit?: number; imagesRemaining?: number }
+
+          if (event.type === 'start' || event.type === 'done') {
+            updateQuotaFromPayload(event)
+          }
 
           if (event.type === 'output') {
             setOutputs((current) =>
@@ -933,9 +1170,13 @@ export function BoardClient() {
     } catch (caught) {
       const message = caught instanceof Error ? caught.message : 'Chat generation failed.'
       setError(message)
-      setOutputs((current) =>
-        current.map((item) => (item.status === 'pending' ? { ...item, status: 'error', error: message } : item))
-      )
+      if (blockedByLimit) {
+        setOutputs([])
+      } else {
+        setOutputs((current) =>
+          current.map((item) => (item.status === 'pending' ? { ...item, status: 'error', error: message } : item))
+        )
+      }
       updateChatMessages((current) =>
         current.map((item) =>
           item.id === assistantId ? { ...item, content: message, status: 'error', images: item.images ?? [] } : item
@@ -1012,6 +1253,129 @@ export function BoardClient() {
     }
   }
 
+  if (!authReady) {
+    return (
+      <main className="flex h-screen min-h-[620px] items-center justify-center bg-[#f4f1ea] px-4 text-neutral-950">
+        <div className="text-sm font-semibold text-neutral-600">Loading...</div>
+      </main>
+    )
+  }
+
+  if (!session) {
+    return (
+      <main className="flex h-screen min-h-[680px] items-center justify-center bg-[#f4f1ea] px-4 text-neutral-950">
+        <section className="w-full max-w-md rounded border border-neutral-950/10 bg-[#fbfaf6] p-5 shadow-sm">
+          <div className="mb-5">
+            <h1 className="m-0 text-2xl font-semibold tracking-normal">AI Moodboard</h1>
+            <p className="m-0 mt-1 text-sm text-neutral-600">Sign in to create, save, generate, and share boards.</p>
+          </div>
+
+          <div className="mb-4 grid grid-cols-2 rounded border border-neutral-300 bg-white p-1">
+            <button
+              type="button"
+              className={`h-9 rounded text-sm font-semibold ${
+                authMode === 'login' ? 'bg-neutral-950 text-white' : 'text-neutral-700'
+              }`}
+              onClick={() => {
+                setAuthMode('login')
+                setError(null)
+                setAuthMessage(null)
+              }}
+            >
+              Log in
+            </button>
+            <button
+              type="button"
+              className={`h-9 rounded text-sm font-semibold ${
+                authMode === 'signup' ? 'bg-neutral-950 text-white' : 'text-neutral-700'
+              }`}
+              onClick={() => {
+                setAuthMode('signup')
+                setError(null)
+                setAuthMessage(null)
+              }}
+            >
+              Sign up
+            </button>
+          </div>
+
+          <form
+            className="grid gap-3"
+            onSubmit={(event) => {
+              event.preventDefault()
+              void handlePasswordAuth()
+            }}
+          >
+            <input
+              value={authEmail}
+              onChange={(event) => setAuthEmail(event.target.value)}
+              type="email"
+              autoComplete="email"
+              placeholder="Email"
+              className="h-11 rounded border border-neutral-300 bg-white px-3 text-sm outline-none transition focus:border-neutral-950"
+            />
+            <input
+              value={authPassword}
+              onChange={(event) => setAuthPassword(event.target.value)}
+              type="password"
+              autoComplete={authMode === 'signup' ? 'new-password' : 'current-password'}
+              placeholder="Password"
+              className="h-11 rounded border border-neutral-300 bg-white px-3 text-sm outline-none transition focus:border-neutral-950"
+            />
+            {authMode === 'signup' ? (
+              <input
+                value={authConfirmPassword}
+                onChange={(event) => setAuthConfirmPassword(event.target.value)}
+                type="password"
+                autoComplete="new-password"
+                placeholder="Confirm password"
+                className="h-11 rounded border border-neutral-300 bg-white px-3 text-sm outline-none transition focus:border-neutral-950"
+              />
+            ) : null}
+            <button
+              type="submit"
+              className="h-11 rounded bg-neutral-950 px-4 text-sm font-semibold text-white disabled:cursor-not-allowed disabled:opacity-50"
+              disabled={authSubmitting}
+            >
+              {authSubmitting ? 'Working...' : authMode === 'signup' ? 'Create account' : 'Log in'}
+            </button>
+          </form>
+
+          <div className="my-4 flex items-center gap-3 text-xs uppercase text-neutral-400">
+            <span className="h-px flex-1 bg-neutral-300" />
+            or
+            <span className="h-px flex-1 bg-neutral-300" />
+          </div>
+
+          <div className="grid gap-2">
+            <button
+              type="button"
+              className="h-11 rounded border border-neutral-300 bg-white px-4 text-sm font-semibold disabled:cursor-not-allowed disabled:opacity-50"
+              onClick={() => void continueWithGoogle()}
+              disabled={authSubmitting}
+            >
+              Continue with Google
+            </button>
+            <button
+              type="button"
+              className="h-11 rounded border border-neutral-300 bg-white px-4 text-sm font-semibold disabled:cursor-not-allowed disabled:opacity-50"
+              onClick={() => void sendMagicLink()}
+              disabled={authSubmitting}
+            >
+              Email magic link
+            </button>
+          </div>
+
+          <p className="m-0 mt-4 text-xs leading-relaxed text-neutral-500">
+            Signup may require email confirmation depending on your Supabase Auth setting.
+          </p>
+          {authMessage ? <p className="m-0 mt-3 text-sm font-medium text-[#0f766e]">{authMessage}</p> : null}
+          {error ? <p className="m-0 mt-3 text-sm font-medium text-red-700">{error}</p> : null}
+        </section>
+      </main>
+    )
+  }
+
   return (
     <main className="flex h-screen min-h-[720px] flex-col bg-[#f4f1ea] text-neutral-950">
       <header className="flex flex-col gap-3 border-b border-neutral-950/10 bg-[#fbfaf6] px-4 py-3 shadow-sm">
@@ -1046,41 +1410,32 @@ export function BoardClient() {
           >
             Open chat
           </button>
-          {session ? (
-            <>
-              <button
-                type="button"
-                className="h-10 rounded border border-neutral-300 bg-white px-3 text-sm font-semibold"
-                onClick={copyShareLink}
-                disabled={!boardRecord}
-              >
-                Share
-              </button>
-              <button
-                type="button"
-                className="h-10 rounded border border-neutral-300 bg-white px-3 text-sm font-semibold"
-                onClick={signOut}
-              >
-                Sign out
-              </button>
-            </>
+          {quota ? (
+            <span
+              className={`rounded border px-3 py-2 text-sm font-semibold ${
+                quotaBlocked ? 'border-red-200 bg-red-50 text-red-800' : 'border-[#0f766e]/20 bg-[#0f766e]/10 text-[#0f766e]'
+              }`}
+            >
+              {quota.imagesRemaining} of {quota.imageLimit} images left
+            </span>
           ) : (
-            <>
-              <input
-                value={email}
-                onChange={(event) => setEmail(event.target.value)}
-                placeholder="Email for save"
-                className="h-10 w-52 rounded border border-neutral-300 bg-white px-3 text-sm outline-none transition focus:border-neutral-950"
-              />
-              <button
-                type="button"
-                className="h-10 rounded border border-neutral-300 bg-white px-3 text-sm font-semibold"
-                onClick={sendMagicLink}
-              >
-                Save login
-              </button>
-            </>
+            <span className="text-sm text-neutral-600">Loading quota...</span>
           )}
+          <button
+            type="button"
+            className="h-10 rounded border border-neutral-300 bg-white px-3 text-sm font-semibold disabled:cursor-not-allowed disabled:opacity-50"
+            onClick={copyShareLink}
+            disabled={!boardRecord}
+          >
+            Share
+          </button>
+          <button
+            type="button"
+            className="h-10 rounded border border-neutral-300 bg-white px-3 text-sm font-semibold"
+            onClick={signOut}
+          >
+            Sign out
+          </button>
         </div>
 
         <div className="flex flex-wrap items-center gap-2">
@@ -1160,7 +1515,7 @@ export function BoardClient() {
             {showResolvedComments ? 'Hide resolved' : 'Show resolved'}
           </button>
           {importState === 'importing' ? <span className="text-sm text-neutral-600">Importing...</span> : null}
-          {session ? <span className="text-sm text-neutral-600">{saveState}</span> : null}
+          <span className="text-sm text-neutral-600">{saveState}</span>
           {shareMessage ? <span className="text-sm text-neutral-600">{shareMessage}</span> : null}
           {error ? <span className="text-sm font-medium text-red-700">{error}</span> : null}
         </div>
@@ -1311,7 +1666,7 @@ export function BoardClient() {
                     <button
                       type="button"
                       className="rounded bg-neutral-950 px-3 py-1.5 text-xs font-semibold text-white disabled:cursor-not-allowed disabled:opacity-50"
-                      disabled={generationState === 'generating'}
+                      disabled={generationState === 'generating' || !canGenerate}
                       onClick={(event) => {
                         event.stopPropagation()
                         void generate()
@@ -1353,6 +1708,15 @@ export function BoardClient() {
             <p className="m-0 w-64 text-sm text-neutral-600">Generated outputs will appear here.</p>
           )}
         </div>
+
+        {quotaBlocked ? (
+          <div className="flex min-w-[260px] max-w-[320px] shrink-0 flex-col justify-center rounded border border-dashed border-red-200 bg-red-50 px-4 py-3 text-red-900">
+            <p className="m-0 text-sm font-semibold">Image limit reached</p>
+            <p className="m-0 mt-1 text-xs leading-relaxed">
+              Upgrade options will appear here soon. Your board, sources, comments, and shares still work.
+            </p>
+          </div>
+        ) : null}
 
         {selectedOutput ? (
           <div className="min-w-[360px] max-w-[460px] border-l border-neutral-950/10 pl-4">
@@ -1561,14 +1925,14 @@ export function BoardClient() {
                     void sendChatMessage()
                   }
                 }}
-                placeholder="Describe the next image"
+                placeholder={canGenerate ? 'Describe the next image' : 'Image limit reached'}
                 rows={2}
                 className="min-h-12 flex-1 resize-none rounded border border-neutral-300 bg-white px-3 py-2 text-sm outline-none transition focus:border-neutral-950"
               />
               <button
                 type="submit"
                 className="h-12 rounded bg-neutral-950 px-4 text-sm font-semibold text-white disabled:cursor-not-allowed disabled:opacity-50"
-                disabled={!chatInput.trim() || chatState !== 'idle'}
+                disabled={!chatInput.trim() || chatState !== 'idle' || !canGenerate}
               >
                 Send
               </button>

@@ -3,23 +3,21 @@ import { NextRequest } from 'next/server'
 import sharp from 'sharp'
 import { BoardDoc } from '@/lib/board'
 import { compileBoardWithMetadata } from '@/lib/assembler'
+import { captureServerEvent } from '@/lib/analytics/server'
+import { getAuthenticatedUser } from '@/lib/supabase/auth'
 import {
   OUTPUT_BUCKET,
-  createServiceSupabaseClient,
   createServiceSupabaseClientWithBucket,
+  createServiceSupabaseClient,
 } from '@/lib/supabase/server'
+import { IMAGES_PER_GENERATION, refundReservedImages, reserveImagesForGeneration } from '@/lib/usage'
 
 export const runtime = 'nodejs'
 export const maxDuration = 60
 
-const DEFAULT_VARIATIONS = 6
-const MAX_GENERATIONS_PER_BOARD = Number(process.env.MAX_GENERATIONS_PER_BOARD ?? 40)
-const MAX_GENERATIONS_PER_USER = Number(process.env.MAX_GENERATIONS_PER_USER ?? 80)
 const MAX_GENERATE_REQUESTS_PER_WINDOW = Number(process.env.MAX_GENERATE_REQUESTS_PER_WINDOW ?? 5)
 const RATE_LIMIT_WINDOW_MS = Number(process.env.GENERATE_RATE_LIMIT_WINDOW_MS ?? 60_000)
 const GENERATION_TIMEOUT_MS = Number(process.env.GENERATION_TIMEOUT_MS ?? 180_000)
-const generationCounts = new Map<string, number>()
-const userGenerationCounts = new Map<string, number>()
 const rateLimitBuckets = new Map<string, { count: number; resetAt: number }>()
 
 type GenerateRequest = {
@@ -87,21 +85,6 @@ function withTimeout<T>(promise: Promise<T>, timeoutMs: number, label: string) {
   ])
 }
 
-async function getRequesterKey(request: NextRequest) {
-  const authorization = request.headers.get('authorization')
-  const token = authorization?.match(/^Bearer\s+(.+)$/i)?.[1]
-
-  if (token) {
-    const supabase = createServiceSupabaseClient()
-    const { data } = await supabase.auth.getUser(token)
-    if (data.user) return `user:${data.user.id}`
-  }
-
-  const forwardedFor = request.headers.get('x-forwarded-for')?.split(',')[0]?.trim()
-  const realIp = request.headers.get('x-real-ip')?.trim()
-  return `ip:${forwardedFor || realIp || 'local'}`
-}
-
 function checkRateLimit(key: string) {
   const now = Date.now()
   const bucket = rateLimitBuckets.get(key)
@@ -152,10 +135,13 @@ async function runGeneration(input: CompiledGenerationInput, boardId: string, sl
 
 export async function POST(request: NextRequest) {
   try {
+    const { user, error: authError } = await getAuthenticatedUser(request)
+    if (!user) return Response.json({ error: authError }, { status: 401 })
+
     const body = (await request.json()) as GenerateRequest
     const boardId = body.boardId?.trim() || 'anonymous'
-    const requestedCount = Math.max(1, Math.min(body.count ?? DEFAULT_VARIATIONS, DEFAULT_VARIATIONS))
-    const requesterKey = await getRequesterKey(request)
+    const count = IMAGES_PER_GENERATION
+    const requesterKey = `user:${user.id}`
     const retryAfter = checkRateLimit(requesterKey)
 
     if (retryAfter) {
@@ -165,12 +151,6 @@ export async function POST(request: NextRequest) {
       )
     }
 
-    const used = generationCounts.get(boardId) ?? 0
-    const usedByRequester = userGenerationCounts.get(requesterKey) ?? 0
-    const remaining = Math.max(0, MAX_GENERATIONS_PER_BOARD - used)
-    const remainingForRequester = Math.max(0, MAX_GENERATIONS_PER_USER - usedByRequester)
-    const count = Math.min(requestedCount, remaining, remainingForRequester)
-
     if (!body.board?.brief?.trim()) {
       return Response.json({ error: 'Add a brief before generating.' }, { status: 400 })
     }
@@ -179,26 +159,58 @@ export async function POST(request: NextRequest) {
       return Response.json({ error: 'Extract at least one element before generating.' }, { status: 400 })
     }
 
-    if (count <= 0) {
-      return Response.json({ error: 'Generation cap reached.' }, { status: 429 })
-    }
-
     if (!process.env.FAL_KEY) {
       return Response.json({ error: 'Missing FAL_KEY.' }, { status: 500 })
     }
 
+    const { compiled, metadata } = await compileBoardWithMetadata(body.board)
+    const supabase = createServiceSupabaseClient()
+    const reservation = await reserveImagesForGeneration(supabase, user.id)
+
+    if (!reservation.reserved) {
+      await captureServerEvent('limit_reached', user.id, {
+        requested_output_count: count,
+        images_used: reservation.quota.imagesUsed,
+        images_remaining: reservation.quota.imagesRemaining,
+        image_limit: reservation.quota.imageLimit,
+      })
+
+      return Response.json(
+        {
+          error: 'Free image limit reached.',
+          code: 'limit_reached',
+          limit_reached: true,
+          ...reservation.quota,
+        },
+        { status: 429 }
+      )
+    }
+
     fal.config({ credentials: process.env.FAL_KEY })
 
-    generationCounts.set(boardId, used + count)
-    userGenerationCounts.set(requesterKey, usedByRequester + count)
-    const { compiled, metadata } = await compileBoardWithMetadata(body.board)
+    let successfulOutputs = 0
+    let reservationSettled = false
+
+    const settleReservation = async () => {
+      if (reservationSettled) return reservation.quota
+      reservationSettled = true
+
+      const refundCount = Math.max(0, count - successfulOutputs)
+      if (!refundCount) return reservation.quota
+
+      try {
+        return await refundReservedImages(supabase, user.id, refundCount)
+      } catch {
+        return reservation.quota
+      }
+    }
 
     const stream = new ReadableStream<Uint8Array>({
       start(controller) {
         writeEvent(controller, {
           type: 'start',
           count,
-          remainingAfterRequest: remaining - count,
+          ...reservation.quota,
           prompt: compiled.prompt,
           palette: metadata.palette,
           paletteSource: metadata.paletteSource,
@@ -206,7 +218,10 @@ export async function POST(request: NextRequest) {
 
         const jobs = Array.from({ length: count }, (_, slot) =>
           runGeneration(compiled, boardId, slot)
-            .then((output) => writeEvent(controller, { type: 'output', ...output }))
+            .then((output) => {
+              successfulOutputs += 1
+              writeEvent(controller, { type: 'output', ...output })
+            })
             .catch((error) =>
               writeEvent(controller, {
                 type: 'error',
@@ -217,15 +232,27 @@ export async function POST(request: NextRequest) {
         )
 
         Promise.allSettled(jobs)
-          .then(() => writeEvent(controller, { type: 'done' }))
+          .then(async () => {
+            const finalQuota = await settleReservation()
+
+            await captureServerEvent('generate', user.id, {
+              output_count: successfulOutputs,
+              requested_output_count: count,
+              images_used: finalQuota.imagesUsed,
+              images_remaining: finalQuota.imagesRemaining,
+              image_limit: finalQuota.imageLimit,
+            })
+
+            writeEvent(controller, {
+              type: 'done',
+              outputCount: successfulOutputs,
+              ...finalQuota,
+            })
+          })
           .finally(() => controller.close())
       },
       cancel() {
-        generationCounts.set(boardId, Math.max(used, (generationCounts.get(boardId) ?? used) - count))
-        userGenerationCounts.set(
-          requesterKey,
-          Math.max(usedByRequester, (userGenerationCounts.get(requesterKey) ?? usedByRequester) - count)
-        )
+        void settleReservation()
       },
     })
 
