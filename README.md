@@ -1,12 +1,13 @@
-# AI Moodboard MVP
+# Moodblendy
 
-Working MVP for a reference-driven AI moodboard. The current model is sources -> elements -> composition: full source images live in a side rail, extracted transparent cutout elements populate the tldraw board, and generation composes from those elements plus swatches, type samples, notes, and the brief.
+Moodblendy is a reference-driven AI moodboard app. The current model is sources -> elements -> composition: full source images live in a side rail, extracted transparent cutout elements populate the tldraw board, and generation composes from those elements plus swatches, type samples, notes, and the brief.
 
 ## Required environment variables
 
 ```bash
 FAL_KEY=
 GOOGLE_FONTS_API_KEY=
+NEXT_PUBLIC_APP_URL=https://moodblendy.com
 NEXT_PUBLIC_SUPABASE_URL=
 NEXT_PUBLIC_SUPABASE_ANON_KEY=
 SUPABASE_SERVICE_ROLE_KEY=
@@ -25,6 +26,7 @@ EXTRACTION_TIMEOUT_MS=180000
 ```
 
 `SUPABASE_SERVICE_ROLE_KEY` is server-only and must not be exposed to the browser.
+`NEXT_PUBLIC_APP_URL` controls generated auth redirects, share links, and metadata. Set it to `https://moodblendy.com` in production.
 `GOOGLE_FONTS_API_KEY` is optional and only needed to resolve fonts by Google Fonts family name. Direct `.ttf`, `.otf`, and `.woff` font URLs work without it.
 Set `NEXT_PUBLIC_TLDRAW_LICENSE_KEY` before public deploy to remove the production license watermark.
 `NEXT_PUBLIC_POSTHOG_KEY` and `NEXT_PUBLIC_POSTHOG_HOST` enable client funnel events. `POSTHOG_SERVER_KEY` and `POSTHOG_HOST` are optional server-side overrides for API events; if omitted, server capture falls back to `NEXT_PUBLIC_POSTHOG_KEY`.
@@ -36,7 +38,7 @@ Enable Supabase Auth email/password. Decide whether the demo should require emai
 - More secure: leave **Confirm email** enabled, so password signups must confirm before login.
 - Lower friction demo: disable **Confirm email** in Supabase Auth settings, so signup creates an immediate session.
 
-Enable the Google provider in Supabase Auth and add your deployed site URL as an allowed redirect URL for Google OAuth.
+Enable the Google provider in Supabase Auth and add your deployed site URL, `https://moodblendy.com`, as an allowed redirect URL for Google OAuth.
 
 Create the boards table:
 
@@ -133,7 +135,7 @@ Round 3 acceptance:
 - Each user gets 10 free generated images. The remaining quota is shown in the UI and enforced in `/api/generate`.
 - The floating Chat widget turns conversational instructions into generation prompts, streams generated images into the thread, and can add any chat image back to the board.
 - Comment mode drops persisted `comment-pin` shapes on the canvas with replies, resolve controls, and a resolved-comment filter.
-- The Share control copies `/b/[share_id]`.
+- The Share control copies `https://moodblendy.com/b/[share_id]` when `NEXT_PUBLIC_APP_URL` is set for production.
 - Shared pages render the persisted tldraw document read-only, without edit controls or generation.
 
 ## Generation route

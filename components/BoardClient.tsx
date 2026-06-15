@@ -7,6 +7,7 @@ import { moodboardShapeUtils } from '@/components/moodboardShapes'
 import { captureClientEvent } from '@/lib/analytics/client'
 import { BoardDoc, ChatMessage, SourceImage, cleanHexColors, cleanTags, isMoodboardDocument } from '@/lib/board'
 import { StoredBoard } from '@/lib/boards'
+import { APP_NAME, getBrowserAppUrl } from '@/lib/site'
 import { createBrowserSupabaseClient } from '@/lib/supabase/client'
 import { IMAGES_PER_GENERATION } from '@/lib/usage-constants'
 
@@ -461,7 +462,7 @@ export function BoardClient() {
           email: trimmedEmail,
           password,
           options: {
-            emailRedirectTo: window.location.origin,
+            emailRedirectTo: getBrowserAppUrl(),
           },
         })
 
@@ -504,7 +505,7 @@ export function BoardClient() {
     const { error: oauthError } = await supabase.auth.signInWithOAuth({
       provider: 'google',
       options: {
-        redirectTo: window.location.origin,
+        redirectTo: getBrowserAppUrl(),
       },
     })
 
@@ -529,7 +530,7 @@ export function BoardClient() {
     const { error: signInError } = await supabase.auth.signInWithOtp({
       email: trimmed,
       options: {
-        emailRedirectTo: window.location.origin,
+        emailRedirectTo: getBrowserAppUrl(),
       },
     })
 
@@ -551,7 +552,7 @@ export function BoardClient() {
 
   const copyShareLink = async () => {
     if (!boardRecord) return
-    const href = `${window.location.origin}/b/${boardRecord.share_id}`
+    const href = `${getBrowserAppUrl()}/b/${boardRecord.share_id}`
     await navigator.clipboard.writeText(href)
     setShareMessage('Share link copied.')
     captureClientEvent('share', { board_id: boardRecord.id }, sessionRef.current?.user.id)
@@ -1266,7 +1267,7 @@ export function BoardClient() {
       <main className="flex h-screen min-h-[680px] items-center justify-center bg-[#f4f1ea] px-4 text-neutral-950">
         <section className="w-full max-w-md rounded border border-neutral-950/10 bg-[#fbfaf6] p-5 shadow-sm">
           <div className="mb-5">
-            <h1 className="m-0 text-2xl font-semibold tracking-normal">AI Moodboard</h1>
+            <h1 className="m-0 text-2xl font-semibold tracking-normal">{APP_NAME}</h1>
             <p className="m-0 mt-1 text-sm text-neutral-600">Sign in to create, save, generate, and share boards.</p>
           </div>
 

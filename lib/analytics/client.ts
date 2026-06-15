@@ -1,5 +1,7 @@
 'use client'
 
+import { APP_NAME } from '@/lib/site'
+
 type AnalyticsProperties = Record<string, string | number | boolean | null | undefined>
 
 const DEFAULT_POSTHOG_HOST = 'https://us.i.posthog.com'
@@ -28,7 +30,7 @@ export function captureClientEvent(
     event,
     distinct_id: distinctId || getAnonymousId(),
     properties: {
-      app: 'ai-moodboard',
+      app: APP_NAME,
       ...properties,
     },
   })

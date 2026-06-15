@@ -1,3 +1,5 @@
+import { APP_NAME } from '@/lib/site'
+
 type AnalyticsProperties = Record<string, string | number | boolean | null | undefined>
 
 const DEFAULT_POSTHOG_HOST = 'https://us.i.posthog.com'
@@ -24,7 +26,7 @@ export async function captureServerEvent(
         event,
         distinct_id: distinctId,
         properties: {
-          app: 'ai-moodboard',
+          app: APP_NAME,
           source: 'server',
           ...properties,
         },
