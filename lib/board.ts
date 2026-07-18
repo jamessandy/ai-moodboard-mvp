@@ -1,9 +1,51 @@
 import { TAGS, Tag } from '@/lib/tags'
 
+export const SOURCE_ROLES = [
+  'pose',
+  'outfit',
+  'background',
+  'lighting',
+  'composition',
+  'color-palette',
+  'hair',
+  'makeup',
+  'props',
+  'identity',
+] as const
+
+export type SourceRole = (typeof SOURCE_ROLES)[number]
+
+export const SOURCE_ROLE_LABELS: Record<SourceRole, string> = {
+  pose: 'Pose',
+  outfit: 'Outfit',
+  background: 'Background',
+  lighting: 'Lighting',
+  composition: 'Composition',
+  'color-palette': 'Color Palette',
+  hair: 'Hair',
+  makeup: 'Makeup',
+  props: 'Props',
+  identity: 'Identity',
+}
+
+export const SOURCE_ROLE_PHRASES: Record<SourceRole, string> = {
+  pose: 'pose and body position reference',
+  outfit: 'outfit and styling reference',
+  background: 'background or environment reference',
+  lighting: 'lighting reference',
+  composition: 'composition and framing reference',
+  'color-palette': 'color palette reference',
+  hair: 'hair reference',
+  makeup: 'makeup reference',
+  props: 'props or object reference',
+  identity: 'identity or likeness reference',
+}
+
 export interface BoardDoc {
   brief: string
   elements: { url: string; label: string; tags: Tag[] }[]
-  imageRefs?: { url: string; tags: Tag[] }[]
+  imageRefs?: { url: string; label?: string; tags: Tag[] }[]
+  sources?: { url: string; label?: string; role?: SourceRole }[]
   swatches: { colors: string[] }[]
   typeSamples: { label: string }[]
   notes: { text: string }[]
@@ -12,10 +54,13 @@ export interface BoardDoc {
 export type SourceImage = {
   id: string
   url: string
+  name?: string
+  role?: SourceRole
 }
 
 export type ChatImage = {
   url: string
+  name?: string
   width?: number
   height?: number
   seed?: number
@@ -66,6 +111,10 @@ const HEX_COLOR = /^#[0-9a-f]{6}$/i
 
 export function cleanTags(tags: string[]): Tag[] {
   return tags.filter((tag): tag is Tag => (TAGS as readonly string[]).includes(tag))
+}
+
+export function cleanSourceRole(role: string | undefined): SourceRole | undefined {
+  return role && (SOURCE_ROLES as readonly string[]).includes(role) ? (role as SourceRole) : undefined
 }
 
 export function cleanHexColors(colors: string[]) {

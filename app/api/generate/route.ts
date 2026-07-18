@@ -155,8 +155,8 @@ export async function POST(request: NextRequest) {
       return Response.json({ error: 'Add a brief before generating.' }, { status: 400 })
     }
 
-    if (!body.board.elements?.length && !body.board.imageRefs?.length) {
-      return Response.json({ error: 'Extract at least one element before generating.' }, { status: 400 })
+    if (!body.board.elements?.length && !body.board.imageRefs?.length && !body.board.sources?.length) {
+      return Response.json({ error: 'Add at least one source or reference before generating.' }, { status: 400 })
     }
 
     if (!process.env.FAL_KEY) {

@@ -57,6 +57,54 @@ test('extracts hex colors from color-tagged references when no swatch exists', a
   assert.match(compiled.prompt, /Element 2 — chair: include as lighting reference\./)
 })
 
+test('includes named image references alongside extracted elements', async () => {
+  const compiled = await compileBoard({
+    ...emptyBoard,
+    elements: [{ url: 'https://storage.example/cutout.png', label: 'jacket cutout', tags: ['subject'] }],
+    imageRefs: [
+      {
+        url: 'https://storage.example/generated-hero.png',
+        label: 'neon hero pass',
+        tags: ['composition', 'mood'],
+      },
+    ],
+  })
+
+  assert.deepEqual(compiled.image_urls, [
+    'https://storage.example/cutout.png',
+    'https://storage.example/generated-hero.png',
+  ])
+  assert.match(compiled.prompt, /Element 1 — jacket cutout: include as subject or object\./)
+  assert.match(compiled.prompt, /Element 2 — neon hero pass: include as composition reference, mood reference\./)
+})
+
+test('includes named source images as generation references', async () => {
+  const compiled = await compileBoard({
+    ...emptyBoard,
+    sources: [{ url: 'https://storage.example/runway-source.jpg', label: 'silver runway source', role: 'outfit' }],
+  })
+
+  assert.deepEqual(compiled.image_urls, ['https://storage.example/runway-source.jpg'])
+  assert.match(compiled.prompt, /Element 1 — silver runway source: use as outfit and styling reference\./)
+})
+
+test('extracts palette from color-palette source roles', async () => {
+  const { compiled, metadata } = await compileBoardWithMetadata(
+    {
+      ...emptyBoard,
+      sources: [{ url: 'https://storage.example/palette-source.jpg', label: 'summer palette', role: 'color-palette' }],
+    },
+    {
+      extractPalette: async () => ['#ffaa00', '#0055ff'],
+    }
+  )
+
+  assert.equal(metadata.paletteSource, 'extracted')
+  assert.deepEqual(metadata.palette, ['#ffaa00', '#0055ff'])
+  assert.match(compiled.prompt, /Color palette: #ffaa00, #0055ff\./)
+  assert.match(compiled.prompt, /Element 1 — summer palette: use as color palette reference\./)
+})
+
 test('caps reference images at ten and includes notes and type-sample instruction', async () => {
   const compiled = await compileBoard({
     ...emptyBoard,

@@ -18,6 +18,7 @@ export type ImageRefShape = TLBaseShape<
   {
     url: string
     assetId?: string
+    label?: string
     tags: Tag[]
     w: number
     h: number
@@ -153,18 +154,38 @@ function EditableElementLabel({ editor, shape }: { editor: Editor; shape: Elemen
   )
 }
 
+function EditableImageRefLabel({ editor, shape }: { editor: Editor; shape: ImageRefShape }) {
+  return (
+    <input
+      value={shape.props.label ?? ''}
+      placeholder="Reference name"
+      className="absolute left-2 top-2 max-w-[calc(100%-16px)] rounded bg-white/90 px-2 py-1 text-xs font-semibold text-neutral-900 shadow placeholder:text-neutral-400"
+      onPointerDown={(event) => event.stopPropagation()}
+      onChange={(event) => {
+        editor.updateShape<ImageRefShape>({
+          id: shape.id,
+          type: 'image-ref',
+          props: { label: event.target.value },
+        })
+      }}
+      aria-label="Reference name"
+    />
+  )
+}
+
 export class ImageRefShapeUtil extends ShapeUtil<ImageRefShape> {
   static override type = 'image-ref' as const
   static override props = {
     url: T.string,
     assetId: T.string.optional(),
+    label: T.string.optional(),
     tags: T.arrayOf(T.string),
     w: T.number,
     h: T.number,
   }
 
   getDefaultProps(): ImageRefShape['props'] {
-    return { url: '', tags: [], w: 280, h: 220 }
+    return { url: '', label: 'reference', tags: [], w: 280, h: 220 }
   }
 
   override canResize() {
@@ -194,6 +215,7 @@ export class ImageRefShapeUtil extends ShapeUtil<ImageRefShape> {
           className="h-full w-full select-none object-cover"
         />
         <div className="pointer-events-none absolute inset-0 bg-gradient-to-t from-black/30 via-transparent to-transparent" />
+        <EditableImageRefLabel editor={this.editor} shape={shape} />
         <ToggleChips editor={this.editor} shape={shape} />
       </HTMLContainer>
     )
@@ -237,8 +259,6 @@ export class ElementShapeUtil extends ShapeUtil<ElementShape> {
   }
 
   component(shape: ElementShape) {
-    const isGeneratedOutput = shape.props.sourceId === 'generated'
-
     return (
       <HTMLContainer className="overflow-visible">
         {/* eslint-disable-next-line @next/next/no-img-element */}
@@ -248,12 +268,8 @@ export class ElementShapeUtil extends ShapeUtil<ElementShape> {
           draggable={false}
           className="h-full w-full select-none object-contain"
         />
-        {isGeneratedOutput ? null : (
-          <>
-            <EditableElementLabel editor={this.editor} shape={shape} />
-            <ToggleChips editor={this.editor} shape={shape} />
-          </>
-        )}
+        <EditableElementLabel editor={this.editor} shape={shape} />
+        <ToggleChips editor={this.editor} shape={shape} />
       </HTMLContainer>
     )
   }

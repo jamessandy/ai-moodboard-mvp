@@ -1,5 +1,5 @@
 import { NextRequest } from 'next/server'
-import type { BoardDoc } from '@/lib/board'
+import { SOURCE_ROLE_PHRASES, type BoardDoc } from '@/lib/board'
 
 export const runtime = 'nodejs'
 export const maxDuration = 30
@@ -29,6 +29,22 @@ function boardContext(board: BoardDoc | undefined) {
     board?.elements?.length
       ? `Use these board elements: ${board.elements
           .map((element) => `${element.label}${element.tags.length ? ` (${element.tags.join(', ')})` : ''}`)
+          .join('; ')}.`
+      : '',
+    board?.imageRefs?.length
+      ? `Use these image references: ${board.imageRefs
+          .map((ref, index) => {
+            const label = ref.label?.trim() || `reference ${index + 1}`
+            return `${label}${ref.tags.length ? ` (${ref.tags.join(', ')})` : ''}`
+          })
+          .join('; ')}.`
+      : '',
+    board?.sources?.length
+      ? `Use these source images: ${board.sources
+          .map((source, index) => {
+            const label = source.label?.trim() || `source ${index + 1}`
+            return source.role ? `${label} (${SOURCE_ROLE_PHRASES[source.role]})` : label
+          })
           .join('; ')}.`
       : '',
     board?.swatches?.length

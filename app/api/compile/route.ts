@@ -16,8 +16,8 @@ export async function POST(request: NextRequest) {
       return Response.json({ error: 'Add a brief before previewing the prompt.' }, { status: 400 })
     }
 
-    if (!body.board.elements?.length && !body.board.imageRefs?.length) {
-      return Response.json({ error: 'Extract at least one element before previewing the prompt.' }, { status: 400 })
+    if (!body.board.elements?.length && !body.board.imageRefs?.length && !body.board.sources?.length) {
+      return Response.json({ error: 'Add at least one source or reference before previewing the prompt.' }, { status: 400 })
     }
 
     const { compiled, metadata } = await compileBoardWithMetadata(body.board)

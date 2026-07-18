@@ -1,5 +1,14 @@
 import { Vibrant } from 'node-vibrant/node'
-import { BoardDoc, CompiledRequest, ELEMENT_ROLE_PHRASES, TAG_PHRASES, cleanHexColors } from '@/lib/board'
+import {
+  BoardDoc,
+  CompiledRequest,
+  ELEMENT_ROLE_PHRASES,
+  SOURCE_ROLE_PHRASES,
+  SourceRole,
+  TAG_PHRASES,
+  cleanHexColors,
+} from '@/lib/board'
+import { Tag } from '@/lib/tags'
 
 export type PaletteExtractor = (url: string) => Promise<string[]>
 export type CompileMetadata = {
@@ -40,6 +49,13 @@ function unique<T>(items: T[]) {
   return [...new Set(items)]
 }
 
+type ReferenceInput = {
+  url: string
+  label: string
+  tags: Tag[]
+  sourceRole?: SourceRole
+}
+
 export async function compileBoard(
   board: BoardDoc,
   options: { extractPalette?: PaletteExtractor } = {}
@@ -52,14 +68,25 @@ export async function compileBoardWithMetadata(
   board: BoardDoc,
   options: { extractPalette?: PaletteExtractor } = {}
 ): Promise<{ compiled: CompiledRequest; metadata: CompileMetadata }> {
-  const elements = (board.elements?.length
-    ? board.elements
-    : (board.imageRefs ?? []).map((ref, index) => ({
-        url: ref.url,
-        label: `reference ${index + 1}`,
-        tags: ref.tags,
-      }))
-  ).slice(0, 10)
+  const elementRefs: ReferenceInput[] = (board.elements ?? []).map((element) => ({
+    url: element.url,
+    label: element.label.trim() || 'element',
+    tags: element.tags,
+    sourceRole: undefined,
+  }))
+  const imageRefs: ReferenceInput[] = (board.imageRefs ?? []).map((ref, index) => ({
+    url: ref.url,
+    label: ref.label?.trim() || `reference ${index + 1}`,
+    tags: ref.tags,
+    sourceRole: undefined,
+  }))
+  const sourceRefs: ReferenceInput[] = (board.sources ?? []).map((source, index) => ({
+    url: source.url,
+    label: source.label?.trim() || `source ${index + 1}`,
+    tags: [],
+    sourceRole: source.role,
+  }))
+  const elements = [...elementRefs, ...imageRefs, ...sourceRefs].filter((element) => element.url).slice(0, 10)
   const image_urls = elements.map((element) => element.url)
   const palette = cleanHexColors(board.swatches.flatMap((swatch) => swatch.colors))
   const hasCuratedPalette = palette.length > 0
@@ -67,7 +94,7 @@ export async function compileBoardWithMetadata(
   let paletteSource: CompileMetadata['paletteSource'] = hasCuratedPalette ? 'swatch' : 'none'
 
   for (const element of elements) {
-    if (element.tags.includes('color') && !hasCuratedPalette) {
+    if ((element.tags.includes('color') || element.sourceRole === 'color-palette') && !hasCuratedPalette) {
       palette.push(...(await extractPalette(element.url)))
     }
   }
@@ -78,6 +105,9 @@ export async function compileBoardWithMetadata(
   const paletteLine = uniquePalette.length ? `Color palette: ${uniquePalette.join(', ')}.` : ''
   const referenceLines = elements
     .map((element, index) => {
+      if (element.sourceRole) {
+        return `Element ${index + 1} — ${element.label}: use as ${SOURCE_ROLE_PHRASES[element.sourceRole]}.`
+      }
       if (!element.tags.length) return `Element ${index + 1} — ${element.label}: include in the composition.`
       return `Element ${index + 1} — ${element.label}: include as ${element.tags
         .map((tag) => ELEMENT_ROLE_PHRASES[tag] ?? TAG_PHRASES[tag])

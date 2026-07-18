@@ -5,7 +5,18 @@ import { Session } from '@supabase/supabase-js'
 import { AssetRecordType, Editor, Tldraw, TLEditorSnapshot, TLComponents, TLStoreSnapshot } from 'tldraw'
 import { moodboardShapeUtils } from '@/components/moodboardShapes'
 import { captureClientEvent } from '@/lib/analytics/client'
-import { BoardDoc, ChatMessage, SourceImage, cleanHexColors, cleanTags, isMoodboardDocument } from '@/lib/board'
+import {
+  BoardDoc,
+  ChatMessage,
+  SOURCE_ROLES,
+  SOURCE_ROLE_LABELS,
+  SourceImage,
+  SourceRole,
+  cleanHexColors,
+  cleanSourceRole,
+  cleanTags,
+  isMoodboardDocument,
+} from '@/lib/board'
 import { StoredBoard } from '@/lib/boards'
 import { APP_NAME, getBrowserAppUrl } from '@/lib/site'
 import { createBrowserSupabaseClient } from '@/lib/supabase/client'
@@ -19,6 +30,7 @@ type ComposePosition = 'top-left' | 'top' | 'top-right' | 'left' | 'center' | 'r
 type TrayOutput = {
   slot: number
   status: 'pending' | 'done' | 'error'
+  name?: string
   url?: string
   width?: number
   height?: number
@@ -34,7 +46,7 @@ type SaveState = 'idle' | 'loading' | 'saving' | 'saved' | 'error'
 type AuthMode = 'login' | 'signup'
 type ExtractionState = {
   sourceId: string
-  action: 'subject' | 'describe' | 'palette'
+  action: 'subject' | 'describe' | 'palette' | 'full'
 } | null
 type UsageQuota = {
   imagesUsed: number
@@ -61,6 +73,81 @@ const COMPOSE_POSITIONS: Array<{ id: ComposePosition; label: string; x: number; 
 
 function randomFrom<T>(items: T[]) {
   return items[Math.floor(Math.random() * items.length)]
+}
+
+function generatedImageName(slot: number) {
+  return `Generated ${slot + 1}`
+}
+
+function composedImageName(slot: number) {
+  return `Composed ${slot + 1}`
+}
+
+function cleanReferenceName(name: string | undefined, fallback: string) {
+  return name?.trim() || fallback
+}
+
+function prettyNameFromPath(path: string) {
+  const segment = path.split('/').filter(Boolean).at(-1) ?? ''
+  let decoded = segment
+  try {
+    decoded = decodeURIComponent(segment)
+  } catch {
+    decoded = segment
+  }
+
+  return decoded
+    .replace(/\.[a-z0-9]{2,5}$/i, '')
+    .replace(/[-_]+/g, ' ')
+    .replace(/\s+/g, ' ')
+    .trim()
+}
+
+function defaultSourceName(payload: { file?: File; url?: string }, index: number) {
+  if (payload.file?.name) {
+    const name = prettyNameFromPath(payload.file.name)
+    if (name) return name
+  }
+
+  if (payload.url) {
+    try {
+      const name = prettyNameFromPath(new URL(payload.url).pathname)
+      if (name) return name
+    } catch {
+      const name = prettyNameFromPath(payload.url)
+      if (name) return name
+    }
+  }
+
+  return `Source ${index + 1}`
+}
+
+function sourceReferenceLabel(source: SourceImage, index: number) {
+  return cleanReferenceName(source.name, `source ${index + 1}`)
+}
+
+function loadImageDimensions(src: string) {
+  return new Promise<{ width: number; height: number }>((resolve, reject) => {
+    const image = new Image()
+    const timeout = window.setTimeout(() => reject(new Error('Image dimension lookup timed out.')), 5000)
+
+    image.onload = () => {
+      window.clearTimeout(timeout)
+      resolve({ width: image.naturalWidth, height: image.naturalHeight })
+    }
+    image.onerror = () => {
+      window.clearTimeout(timeout)
+      reject(new Error('Could not read source image dimensions.'))
+    }
+    image.src = src
+  })
+}
+
+function downloadName(name: string | undefined, fallback: string) {
+  return cleanReferenceName(name, fallback)
+    .toLowerCase()
+    .replace(/[^a-z0-9]+/g, '-')
+    .replace(/^-+|-+$/g, '') || fallback.toLowerCase()
 }
 
 function isInvalidRefreshTokenError(error: unknown) {
@@ -101,6 +188,10 @@ function getStoredChatMessages(document: unknown): ChatMessage[] {
       ...message,
       images: Array.isArray(message.images)
         ? message.images.filter((image) => image && typeof image.url === 'string')
+            .map((image) => ({
+              ...image,
+              name: typeof image.name === 'string' ? image.name : undefined,
+            }))
         : undefined,
     }))
 }
@@ -242,7 +333,15 @@ export function BoardClient() {
     setBoardRecord(board)
     setBrief(board.brief ?? '')
     briefRef.current = board.brief ?? ''
-    setSourceList(isMoodboardDocument(board.document) ? board.document.sources : [])
+    setSourceList(
+      isMoodboardDocument(board.document)
+        ? board.document.sources.map((source) => ({
+            ...source,
+            name: typeof source.name === 'string' ? source.name : undefined,
+            role: cleanSourceRole(source.role),
+          }))
+        : []
+    )
     chatMessagesRef.current = storedChat
     setChatMessages(storedChat)
   }, [])
@@ -416,6 +515,43 @@ export function BoardClient() {
       chatMessagesRef.current = nextMessages
       setChatMessages(nextMessages)
       if (shouldSave) scheduleSave()
+    },
+    [scheduleSave]
+  )
+
+  const updateSourceName = useCallback(
+    (sourceId: string, name: string) => {
+      setSourceList(sourcesRef.current.map((source) => (source.id === sourceId ? { ...source, name } : source)))
+      scheduleSave()
+    },
+    [scheduleSave]
+  )
+
+  const updateSourceRole = useCallback(
+    (sourceId: string, role: SourceRole) => {
+      setSourceList(
+        sourcesRef.current.map((source) =>
+          source.id === sourceId ? { ...source, role: source.role === role ? undefined : role } : source
+        )
+      )
+      scheduleSave()
+    },
+    [scheduleSave]
+  )
+
+  const deleteSource = useCallback(
+    (sourceId: string) => {
+      const source = sourcesRef.current.find((item) => item.id === sourceId)
+      const sourceName = cleanReferenceName(source?.name, 'this source')
+      if (!window.confirm(`Delete ${sourceName} from sources?`)) return
+
+      setSourceList(sourcesRef.current.filter((item) => item.id !== sourceId))
+      setExtractPrompts((current) => {
+        const next = { ...current }
+        delete next[sourceId]
+        return next
+      })
+      scheduleSave()
     },
     [scheduleSave]
   )
@@ -647,6 +783,83 @@ export function BoardClient() {
     [scheduleSave]
   )
 
+  const createImageReferenceAtPoint = useCallback(
+    (
+      input: { imageUrl: string; label: string; source: string; width?: number; height?: number },
+      point?: { x: number; y: number }
+    ) => {
+      const editor = editorRef.current
+      if (!editor) return
+
+      const intrinsicW = Math.max(1, input.width ?? 512)
+      const intrinsicH = Math.max(1, input.height ?? 512)
+      const scale = Math.min(1, 340 / intrinsicW, 260 / intrinsicH)
+      const w = Math.round(intrinsicW * scale)
+      const h = Math.round(intrinsicH * scale)
+      const label = cleanReferenceName(input.label, 'reference')
+      const fallback = editor.getViewportPageBounds().center
+      const x = (point?.x ?? fallback.x) - w / 2
+      const y = (point?.y ?? fallback.y) - h / 2
+      const asset = AssetRecordType.create({
+        id: AssetRecordType.createId(),
+        type: 'image',
+        props: {
+          src: input.imageUrl,
+          w: intrinsicW,
+          h: intrinsicH,
+          mimeType: 'image/png',
+          name: `${label}.png`,
+          isAnimated: false,
+        },
+      })
+
+      editor.createAssets([asset])
+      editor.createShape({
+        type: 'image-ref',
+        x,
+        y,
+        props: {
+          url: input.imageUrl,
+          assetId: asset.id,
+          label,
+          tags: [],
+          w,
+          h,
+        },
+      })
+      scheduleSave()
+      captureClientEvent(
+        'add_reference',
+        {
+          source: input.source,
+          label,
+        },
+        sessionRef.current?.user.id
+      )
+    },
+    [scheduleSave]
+  )
+
+  const updateOutputName = useCallback((slot: number, name: string) => {
+    setOutputs((current) => current.map((output) => (output.slot === slot ? { ...output, name } : output)))
+  }, [])
+
+  const updateChatImageName = useCallback(
+    (messageId: string, url: string, name: string) => {
+      updateChatMessages((current) =>
+        current.map((message) =>
+          message.id === messageId
+            ? {
+                ...message,
+                images: (message.images ?? []).map((image) => (image.url === url ? { ...image, name } : image)),
+              }
+            : message
+        )
+      )
+    },
+    [updateChatMessages]
+  )
+
   const downloadOutput = useCallback(async (output: TrayOutput) => {
     if (output.status !== 'done' || !output.url) return
     setSelectedOutputSlot(output.slot)
@@ -659,7 +872,7 @@ export function BoardClient() {
       const objectUrl = URL.createObjectURL(blob)
       const link = document.createElement('a')
       link.href = objectUrl
-      link.download = `generated-${output.slot + 1}.png`
+      link.download = `${downloadName(output.name, generatedImageName(output.slot))}.png`
       document.body.appendChild(link)
       link.click()
       link.remove()
@@ -685,10 +898,17 @@ export function BoardClient() {
       imageRefs: shapes
         .filter((shape) => shape.type === 'image-ref')
         .map((shape) => {
-          const props = shape.props as { url?: string; tags?: string[] }
-          return { url: props.url ?? '', tags: cleanTags(props.tags ?? []) }
+          const props = shape.props as { url?: string; label?: string; tags?: string[] }
+          return { url: props.url ?? '', label: props.label?.trim(), tags: cleanTags(props.tags ?? []) }
         })
         .filter((ref) => ref.url),
+      sources: sourcesRef.current
+        .map((source, index) => ({
+          url: source.url,
+          label: sourceReferenceLabel(source, index),
+          role: source.role,
+        }))
+        .filter((source) => source.url),
       swatches: shapes
         .filter((shape) => shape.type === 'swatch')
         .map((shape) => {
@@ -743,7 +963,14 @@ export function BoardClient() {
           throw new Error(result.error ?? 'Image import failed.')
         }
 
-        const nextSources = [...sourcesRef.current, { id: crypto.randomUUID(), url: result.url }]
+        const nextSources = [
+          ...sourcesRef.current,
+          {
+            id: crypto.randomUUID(),
+            url: result.url,
+            name: defaultSourceName(payload, sourcesRef.current.length),
+          },
+        ]
         setSourceList(nextSources)
         scheduleSave()
         setUrl('')
@@ -767,6 +994,33 @@ export function BoardClient() {
     const trimmed = url.trim()
     if (trimmed) void importImage({ url: trimmed })
   }
+
+  const addSourceToBoard = useCallback(
+    async (source: SourceImage, index: number) => {
+      setError(null)
+      setExtractionState({ sourceId: source.id, action: 'full' })
+
+      let dimensions: { width?: number; height?: number } = {}
+      try {
+        dimensions = await loadImageDimensions(source.url)
+      } catch {
+        dimensions = {}
+      }
+
+      try {
+        createImageReferenceAtPoint({
+          imageUrl: source.url,
+          label: sourceReferenceLabel(source, index),
+          source: 'source',
+          width: dimensions.width,
+          height: dimensions.height,
+        })
+      } finally {
+        setExtractionState(null)
+      }
+    },
+    [createImageReferenceAtPoint]
+  )
 
   const extractSource = async (source: SourceImage, action: 'subject' | 'describe') => {
     const prompt = extractPrompts[source.id]?.trim()
@@ -799,7 +1053,7 @@ export function BoardClient() {
 
       createElementAtPoint({
         imageUrl: result.url,
-        label: action === 'describe' ? prompt ?? 'element' : 'subject',
+        label: action === 'describe' ? prompt ?? 'element' : cleanReferenceName(source.name, 'subject'),
         sourceId: source.id,
         width: result.width,
         height: result.height,
@@ -879,7 +1133,13 @@ export function BoardClient() {
     setError(null)
     setSelectedOutputSlot(null)
     setGenerationState('generating')
-    setOutputs(Array.from({ length: IMAGES_PER_GENERATION }, (_, slot) => ({ slot, status: 'pending' })))
+    setOutputs(
+      Array.from({ length: IMAGES_PER_GENERATION }, (_, slot) => ({
+        slot,
+        status: 'pending',
+        name: generatedImageName(slot),
+      }))
+    )
     let blockedByLimit = false
 
     try {
@@ -943,6 +1203,7 @@ export function BoardClient() {
                   ? {
                       slot: event.slot,
                       status: 'done',
+                      name: item.name ?? generatedImageName(event.slot),
                       url: event.url,
                       width: event.width,
                       height: event.height,
@@ -957,7 +1218,7 @@ export function BoardClient() {
             setOutputs((current) =>
               current.map((item) =>
                 item.slot === event.slot
-                  ? { slot: event.slot, status: 'error', error: event.error }
+                  ? { slot: event.slot, status: 'error', name: item.name, error: event.error }
                   : item
               )
             )
@@ -1057,7 +1318,13 @@ export function BoardClient() {
       setChatState('generating')
       setSelectedOutputSlot(null)
       setGenerationState('generating')
-      setOutputs(Array.from({ length: IMAGES_PER_GENERATION }, (_, slot) => ({ slot, status: 'pending' })))
+      setOutputs(
+        Array.from({ length: IMAGES_PER_GENERATION }, (_, slot) => ({
+          slot,
+          status: 'pending',
+          name: generatedImageName(slot),
+        }))
+      )
 
       const generationResponse = await fetch('/api/generate', {
         method: 'POST',
@@ -1123,6 +1390,7 @@ export function BoardClient() {
                   ? {
                       slot: event.slot,
                       status: 'done',
+                      name: item.name ?? generatedImageName(event.slot),
                       url: event.url,
                       width: event.width,
                       height: event.height,
@@ -1138,7 +1406,13 @@ export function BoardClient() {
                       ...message,
                       images: [
                         ...(message.images ?? []),
-                        { url: event.url, width: event.width, height: event.height, seed: event.seed },
+                        {
+                          url: event.url,
+                          name: generatedImageName(event.slot),
+                          width: event.width,
+                          height: event.height,
+                          seed: event.seed,
+                        },
                       ],
                     }
                   : message
@@ -1150,7 +1424,7 @@ export function BoardClient() {
             setOutputs((current) =>
               current.map((item) =>
                 item.slot === event.slot
-                  ? { slot: event.slot, status: 'error', error: event.error }
+                  ? { slot: event.slot, status: 'error', name: item.name, error: event.error }
                   : item
               )
             )
@@ -1243,7 +1517,7 @@ export function BoardClient() {
       const slot = outputs.length
       setOutputs((current) => [
         ...current,
-        { slot, status: 'done', url: result.url, width: result.width, height: result.height },
+        { slot, status: 'done', name: composedImageName(slot), url: result.url, width: result.width, height: result.height },
       ])
       setSelectedOutputSlot(slot)
     } catch (caught) {
@@ -1539,13 +1813,59 @@ export function BoardClient() {
               </button>
             </div>
             {sources.length ? (
-              sources.map((source) => {
+              sources.map((source, index) => {
                 const busy = extractionState?.sourceId === source.id
                 return (
                   <div key={source.id} className="rounded border border-neutral-300 bg-white p-2">
                     {/* eslint-disable-next-line @next/next/no-img-element */}
-                    <img src={source.url} alt="" className="aspect-video w-full rounded object-cover" />
+                    <img src={source.url} alt={source.name ?? ''} className="aspect-video w-full rounded object-cover" />
                     <div className="mt-2 grid gap-2">
+                      <div className="flex gap-2">
+                        <input
+                          value={source.name ?? ''}
+                          onChange={(event) => updateSourceName(source.id, event.target.value)}
+                          placeholder="Source name"
+                          className="h-9 min-w-0 flex-1 rounded border border-neutral-300 bg-white px-2 text-sm font-semibold outline-none focus:border-neutral-950"
+                          aria-label="Source name"
+                        />
+                        <button
+                          type="button"
+                          className="h-9 rounded border border-red-200 bg-red-50 px-2 text-xs font-semibold text-red-700 disabled:opacity-50"
+                          disabled={busy}
+                          onClick={() => deleteSource(source.id)}
+                        >
+                          Delete
+                        </button>
+                      </div>
+                      <div className="grid grid-cols-2 gap-1">
+                        {SOURCE_ROLES.map((role) => {
+                          const active = source.role === role
+                          return (
+                            <button
+                              key={role}
+                              type="button"
+                              className={`h-7 rounded border px-2 text-[11px] font-semibold transition ${
+                                active
+                                  ? 'border-[#0f766e] bg-[#0f766e] text-white'
+                                  : 'border-neutral-300 bg-white text-neutral-700'
+                              }`}
+                              aria-pressed={active}
+                              title={role === 'identity' ? 'Identity reference, optional' : SOURCE_ROLE_LABELS[role]}
+                              onClick={() => updateSourceRole(source.id, role)}
+                            >
+                              {SOURCE_ROLE_LABELS[role]}
+                            </button>
+                          )
+                        })}
+                      </div>
+                      <button
+                        type="button"
+                        className="h-9 rounded border border-neutral-300 px-3 text-sm font-semibold disabled:opacity-50"
+                        disabled={busy}
+                        onClick={() => void addSourceToBoard(source, index)}
+                      >
+                        {busy && extractionState?.action === 'full' ? 'Adding...' : 'Add full image'}
+                      </button>
                       <button
                         type="button"
                         className="h-9 rounded bg-neutral-950 px-3 text-sm font-semibold text-white disabled:opacity-50"
@@ -1643,13 +1963,13 @@ export function BoardClient() {
         </div>
       </section>
 
-      <aside className="flex min-h-[190px] gap-4 overflow-x-auto border-t border-neutral-950/10 bg-[#fbfaf6] px-4 py-3">
-        <div className="flex shrink-0 items-center gap-3">
+      <aside className="flex min-h-[230px] gap-4 overflow-x-auto border-t border-neutral-950/10 bg-[#fbfaf6] px-4 py-3">
+        <div className="flex shrink-0 items-start gap-3">
           {outputs.length ? (
             outputs.map((output) => (
               <div
                 key={output.slot}
-                className={`flex h-40 w-40 shrink-0 flex-col overflow-hidden rounded border bg-white transition ${
+                className={`flex h-52 w-44 shrink-0 flex-col overflow-hidden rounded border bg-white transition ${
                   selectedOutputSlot === output.slot
                     ? 'border-[#0f766e] ring-2 ring-[#0f766e]/30'
                     : 'border-neutral-300'
@@ -1689,18 +2009,50 @@ export function BoardClient() {
                       }}
                     >
                       {/* eslint-disable-next-line @next/next/no-img-element */}
-                      <img src={output.url} alt="" className="h-full w-full object-cover" draggable={false} />
+                      <img
+                        src={output.url}
+                        alt={output.name ?? ''}
+                        className="h-full w-full object-cover"
+                        draggable={false}
+                      />
                     </button>
-                    <button
-                      type="button"
-                      className="h-10 w-full border-t border-neutral-200 bg-[#0f766e] px-2 text-sm font-semibold text-white"
-                      onClick={(event) => {
-                        event.stopPropagation()
-                        void downloadOutput(output)
-                      }}
-                    >
-                      Download
-                    </button>
+                    <input
+                      value={output.name ?? ''}
+                      onChange={(event) => updateOutputName(output.slot, event.target.value)}
+                      onClick={(event) => event.stopPropagation()}
+                      placeholder="Reference name"
+                      className="h-8 border-t border-neutral-200 px-2 text-xs font-semibold outline-none focus:bg-[#f7fffc]"
+                      aria-label={`Name output ${output.slot + 1}`}
+                    />
+                    <div className="grid h-9 grid-cols-2 border-t border-neutral-200">
+                      <button
+                        type="button"
+                        className="border-r border-neutral-200 bg-[#0f766e] px-2 text-xs font-semibold text-white"
+                        onClick={(event) => {
+                          event.stopPropagation()
+                          if (!output.url) return
+                          createImageReferenceAtPoint({
+                            imageUrl: output.url,
+                            label: cleanReferenceName(output.name, generatedImageName(output.slot)),
+                            source: 'generated',
+                            width: output.width,
+                            height: output.height,
+                          })
+                        }}
+                      >
+                        Use as ref
+                      </button>
+                      <button
+                        type="button"
+                        className="bg-white px-2 text-xs font-semibold text-neutral-800"
+                        onClick={(event) => {
+                          event.stopPropagation()
+                          void downloadOutput(output)
+                        }}
+                      >
+                        Download
+                      </button>
+                    </div>
                   </>
                 ) : null}
               </div>
@@ -1873,15 +2225,22 @@ export function BoardClient() {
                           {message.images.map((image) => (
                             <div key={image.url} className="overflow-hidden rounded border border-neutral-200 bg-white">
                               {/* eslint-disable-next-line @next/next/no-img-element */}
-                              <img src={image.url} alt="" className="aspect-square w-full object-cover" />
+                              <img src={image.url} alt={image.name ?? ''} className="aspect-square w-full object-cover" />
+                              <input
+                                value={image.name ?? ''}
+                                onChange={(event) => updateChatImageName(message.id, image.url, event.target.value)}
+                                placeholder="Reference name"
+                                className="h-9 w-full border-t border-neutral-200 px-3 text-sm font-semibold text-neutral-900 outline-none focus:bg-[#f7fffc]"
+                                aria-label="Chat image name"
+                              />
                               <button
                                 type="button"
                                 className="h-9 w-full border-t border-neutral-200 bg-[#0f766e] px-3 text-sm font-semibold text-white"
                                 onClick={() =>
-                                  createElementAtPoint({
+                                  createImageReferenceAtPoint({
                                     imageUrl: image.url,
-                                    label: 'chat output',
-                                    sourceId: 'chat',
+                                    label: cleanReferenceName(image.name, 'chat output'),
+                                    source: 'chat',
                                     width: image.width,
                                     height: image.height,
                                   })
