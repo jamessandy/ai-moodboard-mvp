@@ -274,6 +274,7 @@ export function BoardClient() {
   const initialSnapshotRef = useRef<TLEditorSnapshot | TLStoreSnapshot | undefined>(undefined)
   const hydratedBoardIdRef = useRef<string | null>(null)
   const syncPreservedSnapshotBoardIdRef = useRef<string | null>(null)
+  const saveBoardRef = useRef<(() => Promise<void>) | null>(null)
   const suppressSaveRef = useRef(false)
   const [brief, setBrief] = useState('')
   const briefRef = useRef('')
@@ -481,7 +482,8 @@ export function BoardClient() {
     const storedChat = getStoredChatMessages(board.document)
     const rawSnapshot = getStoredTldrawSnapshot(board.document)
     const editor = editorRef.current
-    const currentSnapshot = editor?.store.getStoreSnapshot('document')
+    const sameHydratedBoard = hydratedBoardIdRef.current === board.id
+    const currentSnapshot = sameHydratedBoard ? editor?.store.getStoreSnapshot('document') : undefined
     const selection = selectBoardSnapshot(rawSnapshot, currentSnapshot)
     const preserveCurrent = selection.preserveCurrent && isTldrawSnapshot(selection.snapshot)
     if (preserveCurrent) {
@@ -529,6 +531,9 @@ export function BoardClient() {
           suppressSaveRef.current = false
         }
       }
+    }
+    if (preserveCurrent && sameHydratedBoard) {
+      window.setTimeout(() => void saveBoardRef.current?.(), 0)
     }
   }, [refreshCanvasStats])
 
@@ -679,6 +684,10 @@ export function BoardClient() {
       setSaveState('error')
     }
   }, [])
+
+  useEffect(() => {
+    saveBoardRef.current = saveBoard
+  }, [saveBoard])
 
   const scheduleSave = useCallback(() => {
     refreshCanvasStats()

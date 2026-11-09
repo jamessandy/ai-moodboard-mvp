@@ -60,10 +60,19 @@ test('preserves current canvas shapes when a remote image shape has no usable as
 
 test('uses the remote snapshot when it contains shapes', () => {
   const remote = imageSnapshot(true)
-  const selection = selectBoardSnapshot(remote, snapshot(['element:1', 'swatch:1']))
+  const selection = selectBoardSnapshot(remote, snapshot([]))
 
   assert.equal(selection.snapshot, remote)
   assert.equal(selection.preserveCurrent, false)
   assert.equal(selection.remoteShapeCount, 1)
   assert.equal(selection.remoteIncomplete, false)
+})
+
+test('preserves the mounted canvas over an equally sized remote refresh', () => {
+  const current = snapshot(['element:1', 'swatch:1'])
+  const remote = snapshot(['element:2', 'swatch:2'])
+  const selection = selectBoardSnapshot(remote, current)
+
+  assert.equal(selection.snapshot, current)
+  assert.equal(selection.preserveCurrent, true)
 })

@@ -181,7 +181,9 @@ export function selectBoardSnapshot(remoteSnapshot: unknown, currentSnapshot: un
   const remoteShapeCount = countSnapshotShapes(remoteSnapshot)
   const localShapeCount = countSnapshotShapes(currentSnapshot)
   const remoteIncomplete = remoteShapeCount > 0 && !hasCompleteImageAssets(remoteSnapshot)
-  const preserveCurrent = localShapeCount > 0 && (remoteShapeCount === 0 || remoteIncomplete)
+  const preserveCurrent =
+    localShapeCount > 0 &&
+    (remoteShapeCount === 0 || remoteIncomplete || localShapeCount >= remoteShapeCount)
 
   return {
     snapshot: preserveCurrent ? currentSnapshot : remoteSnapshot,
