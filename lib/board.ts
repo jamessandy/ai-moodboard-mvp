@@ -142,15 +142,52 @@ function countSnapshotShapes(snapshot: unknown) {
   }).length
 }
 
+function hasCompleteImageAssets(snapshot: unknown) {
+  if (!snapshot || typeof snapshot !== 'object' || !('store' in snapshot)) return false
+  const store = (snapshot as { store?: unknown }).store
+  if (!store || typeof store !== 'object' || Array.isArray(store)) return false
+
+  const records = Object.values(store)
+  const assets = new Map(
+    records
+      .filter(
+        (record): record is { typeName: string; id: string; props: { src?: unknown } } =>
+          Boolean(
+            record &&
+              typeof record === 'object' &&
+              'typeName' in record &&
+              record.typeName === 'asset' &&
+              'id' in record &&
+              typeof record.id === 'string' &&
+              'props' in record &&
+              record.props &&
+              typeof record.props === 'object'
+          )
+      )
+      .map((asset) => [asset.id, asset.props.src])
+  )
+
+  return records.every((record) => {
+    if (!record || typeof record !== 'object' || !('typeName' in record) || record.typeName !== 'shape') return true
+    const shape = record as { type?: unknown; props?: { assetId?: unknown } }
+    if (shape.type === 'image' && typeof shape.props?.assetId !== 'string') return false
+    if (!['image', 'image-ref', 'element'].includes(String(shape.type))) return true
+    const assetId = shape.props?.assetId
+    return typeof assetId === 'string' && typeof assets.get(assetId) === 'string' && assets.get(assetId) !== ''
+  })
+}
+
 export function selectBoardSnapshot(remoteSnapshot: unknown, currentSnapshot: unknown) {
   const remoteShapeCount = countSnapshotShapes(remoteSnapshot)
   const localShapeCount = countSnapshotShapes(currentSnapshot)
-  const preserveCurrent = remoteShapeCount === 0 && localShapeCount > 0
+  const remoteIncomplete = remoteShapeCount > 0 && !hasCompleteImageAssets(remoteSnapshot)
+  const preserveCurrent = localShapeCount > 0 && (remoteShapeCount === 0 || remoteIncomplete)
 
   return {
     snapshot: preserveCurrent ? currentSnapshot : remoteSnapshot,
     preserveCurrent,
     remoteShapeCount,
     localShapeCount,
+    remoteIncomplete,
   }
 }
