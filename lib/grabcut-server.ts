@@ -1,4 +1,5 @@
 import sharp from 'sharp'
+import { createRequire } from 'node:module'
 
 type CvMat = {
   data: Uint8Array
@@ -27,18 +28,17 @@ type OpenCv = {
   ) => void
 }
 
-type OpenCvPackage = { default: OpenCv | Promise<OpenCv> }
 type Cutout = { buffer: Buffer; width: number; height: number }
 
 const MAX_IMAGE_DIMENSION = 1024
+const require = createRequire(`${process.cwd()}/package.json`)
 let openCvPromise: Promise<OpenCv> | null = null
 
 async function getOpenCv() {
   if (!openCvPromise) {
-    openCvPromise = import('@techstark/opencv-js')
-      .then(async (opencvPackage) => {
-        const runtime = (opencvPackage as unknown as OpenCvPackage).default
-        const cv = await runtime
+    const runtime = require('@techstark/opencv-js') as Promise<OpenCv>
+    openCvPromise = Promise.resolve(runtime)
+      .then((cv) => {
         if (!cv?.Mat || !cv.matFromArray || !cv.grabCut) {
           throw new Error('The local OpenCV runtime did not initialize.')
         }
