@@ -252,6 +252,7 @@ export function BoardClient() {
   const pendingAuthMethodRef = useRef<string | null>(null)
   const boardRef = useRef<StoredBoard | null>(null)
   const initialSnapshotRef = useRef<TLEditorSnapshot | TLStoreSnapshot | undefined>(undefined)
+  const hydratedBoardIdRef = useRef<string | null>(null)
   const suppressSaveRef = useRef(false)
   const [brief, setBrief] = useState('')
   const briefRef = useRef('')
@@ -446,6 +447,7 @@ export function BoardClient() {
     setSession(null)
     boardRef.current = null
     initialSnapshotRef.current = undefined
+    hydratedBoardIdRef.current = null
     setBoardRecord(null)
     setQuota(null)
     chatMessagesRef.current = []
@@ -607,7 +609,13 @@ export function BoardClient() {
     const currentBoard = boardRef.current
     const editor = editorRef.current
 
-    if (!currentSession || !currentBoard || !editor || suppressSaveRef.current) return
+    if (
+      !currentSession ||
+      !currentBoard ||
+      hydratedBoardIdRef.current !== currentBoard.id ||
+      !editor ||
+      suppressSaveRef.current
+    ) return
 
     setSaveState('saving')
 
@@ -646,7 +654,12 @@ export function BoardClient() {
 
   const scheduleSave = useCallback(() => {
     refreshCanvasStats()
-    if (!sessionRef.current || !boardRef.current || suppressSaveRef.current) return
+    if (
+      !sessionRef.current ||
+      !boardRef.current ||
+      hydratedBoardIdRef.current !== boardRef.current.id ||
+      suppressSaveRef.current
+    ) return
     if (saveTimerRef.current) clearTimeout(saveTimerRef.current)
     saveTimerRef.current = setTimeout(() => {
       void saveBoard()
@@ -1231,15 +1244,11 @@ export function BoardClient() {
   }
 
   const addSourceToBoard = useCallback(
-    async (source: SourceImage, index: number) => {
+    (source: SourceImage, index: number) => {
       setError(null)
-      setExtractionState({ sourceId: source.id, action: 'full' })
-
-      let dimensions: { width?: number; height?: number } = {}
-      try {
-        dimensions = await loadImageDimensions(source.url)
-      } catch {
-        dimensions = {}
+      if (!editorRef.current) {
+        setError('The canvas is still loading. Try adding this reference again.')
+        return
       }
 
       try {
@@ -1247,11 +1256,10 @@ export function BoardClient() {
           imageUrl: source.url,
           label: sourceReferenceLabel(source, index),
           source: 'source',
-          width: dimensions.width,
-          height: dimensions.height,
         })
-      } finally {
-        setExtractionState(null)
+      } catch (caught) {
+        const message = caught instanceof Error ? caught.message : 'Could not add this reference to the canvas.'
+        setError(message)
       }
     },
     [createImageReferenceAtPoint]
@@ -2682,7 +2690,14 @@ export function BoardClient() {
                 snapshot={tldrawSnapshot}
                 onMount={(editor) => {
                   editorRef.current = editor
+                  const mountedBoardId = boardRecord?.id ?? null
                   let disposed = false
+                  const markBoardHydrated = () => {
+                    if (mountedBoardId && boardRef.current?.id === mountedBoardId) {
+                      hydratedBoardIdRef.current = mountedBoardId
+                    }
+                    suppressSaveRef.current = false
+                  }
 
                   const fitCanvasContent = (attempts = 0) => {
                     if (disposed) return
@@ -2706,7 +2721,7 @@ export function BoardClient() {
                     } else {
                       editor.resetZoom(editor.getViewportScreenCenter(), { animation: { duration: 0 } })
                     }
-                    suppressSaveRef.current = false
+                    markBoardHydrated()
                     refreshCanvasStats()
                   }
 
@@ -2716,6 +2731,7 @@ export function BoardClient() {
                       fitCanvasContent()
                     })
                   } else {
+                    markBoardHydrated()
                     refreshCanvasStats()
                   }
 

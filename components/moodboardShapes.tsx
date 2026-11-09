@@ -212,6 +212,7 @@ export class ImageRefShapeUtil extends ShapeUtil<ImageRefShape> {
           src={shape.props.url}
           alt=""
           draggable={false}
+          decoding="async"
           className="h-full w-full select-none object-cover"
         />
         <div className="pointer-events-none absolute inset-0 bg-gradient-to-t from-black/30 via-transparent to-transparent" />
@@ -266,6 +267,7 @@ export class ElementShapeUtil extends ShapeUtil<ElementShape> {
           src={shape.props.url}
           alt=""
           draggable={false}
+          decoding="async"
           className="h-full w-full select-none object-contain"
         />
         <EditableElementLabel editor={this.editor} shape={shape} />
