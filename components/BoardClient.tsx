@@ -520,13 +520,6 @@ export function BoardClient() {
             const shapes = editor.getCurrentPageShapes()
             if (shapes.length > 0) {
               editor.zoomToFit({ animation: { duration: 0 } })
-              if (shapes.length <= 8 && editor.getZoomLevel() < 0.5) {
-                const pageBounds = editor.getCurrentPageBounds()
-                if (pageBounds) {
-                  editor.centerOnPoint({ x: pageBounds.center.x, y: pageBounds.center.y }, { animation: { duration: 0 } })
-                  editor.resetZoom(editor.getViewportScreenCenter(), { animation: { duration: 0 } })
-                }
-              }
             }
             suppressSaveRef.current = false
             refreshCanvasStats()
@@ -2781,13 +2774,6 @@ export function BoardClient() {
                     const shapes = editor.getCurrentPageShapes()
                     if (shapes.length > 0) {
                       editor.zoomToFit({ animation: { duration: 0 } })
-                      if (shapes.length <= 8 && editor.getZoomLevel() < 0.5) {
-                        const pageBounds = editor.getCurrentPageBounds()
-                        if (pageBounds) {
-                          editor.centerOnPoint({ x: pageBounds.center.x, y: pageBounds.center.y }, { animation: { duration: 0 } })
-                          editor.resetZoom(editor.getViewportScreenCenter(), { animation: { duration: 0 } })
-                        }
-                      }
                     } else {
                       editor.resetZoom(editor.getViewportScreenCenter(), { animation: { duration: 0 } })
                     }
