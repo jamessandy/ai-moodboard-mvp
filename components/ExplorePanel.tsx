@@ -2,7 +2,7 @@
 
 import { useCallback, useEffect, useMemo, useState } from 'react'
 import type { Editor } from 'tldraw'
-import { AssetRecordType } from 'tldraw'
+import { AssetRecordType, createShapeId } from 'tldraw'
 import { captureClientEvent } from '@/lib/analytics/client'
 import {
   DIRECTORY_BRANCHES,
@@ -55,10 +55,81 @@ interface VibeSearchResponse {
 function loadImageDimensions(src: string) {
   return new Promise<{ width: number; height: number }>((resolve) => {
     const img = new Image()
-    img.onload = () => resolve({ width: img.naturalWidth, height: img.naturalHeight })
-    img.onerror = () => resolve({ width: 400, height: 300 })
+    const finish = (dimensions: { width: number; height: number }) => {
+      window.clearTimeout(timeout)
+      resolve(dimensions)
+    }
+    const timeout = window.setTimeout(() => finish({ width: 600, height: 600 }), 5000)
+    img.onload = () => finish({ width: img.naturalWidth, height: img.naturalHeight })
+    img.onerror = () => finish({ width: 600, height: 600 })
     img.src = src
   })
+}
+
+function imageMimeType(src: string) {
+  const dataUrlMime = src.match(/^data:(image\/[a-z\d.+-]+);base64,/i)?.[1]
+  if (dataUrlMime) return dataUrlMime.toLowerCase()
+
+  const extension = (() => {
+    try {
+      return new URL(src, window.location.origin).pathname.match(/\.([a-z\d]+)$/i)?.[1]?.toLowerCase()
+    } catch {
+      return src.match(/\.([a-z\d]+)(?:\?|$)/i)?.[1]?.toLowerCase()
+    }
+  })()
+  if (extension === 'jpg' || extension === 'jpeg') return 'image/jpeg'
+  if (extension === 'webp') return 'image/webp'
+  if (extension === 'gif') return 'image/gif'
+  if (extension === 'avif') return 'image/avif'
+  return 'image/png'
+}
+
+function addImageReference(
+  editor: Editor,
+  input: { src: string; label: string; width: number; height: number; tags: Tag[] }
+) {
+  const intrinsicWidth = Math.max(1, input.width)
+  const intrinsicHeight = Math.max(1, input.height)
+  const scale = Math.min(1, 340 / intrinsicWidth, 260 / intrinsicHeight)
+  const width = Math.round(intrinsicWidth * scale)
+  const height = Math.round(intrinsicHeight * scale)
+  const viewport = editor.getViewportPageBounds()
+  const centerX = viewport.x + viewport.w / 2
+  const centerY = viewport.y + viewport.h / 2
+  const existingImageCount = editor
+    .getCurrentPageShapes()
+    .filter((shape) => shape.type === 'image-ref' || shape.type === 'element').length
+  const offset = (existingImageCount % 8) * 28
+  const x = centerX - width / 2 + offset
+  const y = centerY - height / 2 + offset
+  const asset = AssetRecordType.create({
+    id: AssetRecordType.createId(),
+    type: 'image',
+    props: {
+      src: input.src,
+      w: intrinsicWidth,
+      h: intrinsicHeight,
+      mimeType: imageMimeType(input.src),
+      name: input.label,
+      isAnimated: false,
+    },
+  })
+  const shapeId = createShapeId()
+
+  editor.run(() => {
+    editor.createAssets([asset])
+    editor.createShape({
+      id: shapeId,
+      type: 'image-ref',
+      x,
+      y,
+      props: { url: input.src, assetId: asset.id, label: input.label, tags: input.tags, w: width, h: height },
+    } as Parameters<Editor['createShape']>[0])
+    editor.setSelectedShapes([shapeId])
+  })
+  editor.zoomToSelection({ animation: { duration: 200 } })
+
+  return { x, y, width, height }
 }
 
 // ── Branch Icons ─────────────────────────────────────────────────────────────
@@ -113,7 +184,7 @@ export function ExplorePanel({ open, onClose, editorRef, onScheduleSave, session
   }, [activeBranch, activeSubBranch, activeTag])
 
   useEffect(() => {
-    if (open) void fetchItems()
+    if (open) queueMicrotask(() => void fetchItems())
   }, [open, fetchItems])
 
   // ── Execute Vibe Search (Option A vs Option B) ──────────────────────────────
@@ -197,52 +268,24 @@ export function ExplorePanel({ open, onClose, editorRef, onScheduleSave, session
         const importForm = new FormData()
         importForm.append('url', data.image_url)
         const importResponse = await fetch('/api/import-image', { method: 'POST', body: importForm })
-        const importData = await importResponse.json()
-
-        if (importData.url) {
-          const editor = editorRef.current
-          if (editor) {
-            const dims = await loadImageDimensions(importData.url)
-            const scale = Math.min(1, 340 / dims.width, 260 / dims.height)
-            const w = Math.round(dims.width * scale)
-            const h = Math.round(dims.height * scale)
-            const viewport = editor.getViewportPageBounds()
-            const x = viewport.x + viewport.w / 2 - w / 2 + Math.random() * 36
-            const y = viewport.y + viewport.h / 2 - h / 2 + Math.random() * 36
-
-            const asset = AssetRecordType.create({
-              id: AssetRecordType.createId(),
-              type: 'image',
-              props: {
-                src: importData.url,
-                w: dims.width,
-                h: dims.height,
-                mimeType: 'image/png',
-                name: `${data.title || 'clipped'}.png`,
-                isAnimated: false,
-              },
-            })
-            editor.createAssets([asset])
-            editor.createShape({
-              type: 'image-ref',
-              x,
-              y,
-              props: {
-                url: importData.url,
-                assetId: asset.id,
-                label: data.title || data.site_name || 'Clipped reference',
-                tags: [],
-                w,
-                h,
-              },
-            } as Parameters<Editor['createShape']>[0])
-            onScheduleSave()
-            captureClientEvent('explore_url_clipped', { url: clipperUrl, site: data.site_name ?? '' }, sessionUserId)
-          }
-          setClipperUrl('')
-        } else {
-          setClipperError(importData.error || 'Could not import image.')
+        const importData = (await importResponse.json()) as { url?: string; error?: string }
+        if (!importResponse.ok || !importData.url) {
+          throw new Error(importData.error || 'Could not import image.')
         }
+
+        const editor = editorRef.current
+        if (!editor) throw new Error('The canvas is still loading. Try again.')
+        const dims = await loadImageDimensions(importData.url)
+        addImageReference(editor, {
+          src: importData.url,
+          label: data.title || data.site_name || 'Clipped reference',
+          width: dims.width,
+          height: dims.height,
+          tags: [],
+        })
+        onScheduleSave()
+        captureClientEvent('explore_url_clipped', { url: clipperUrl, site: data.site_name ?? '' }, sessionUserId)
+        setClipperUrl('')
       }
     } catch (err) {
       setClipperError(err instanceof Error ? err.message : 'Unfurl failed.')
@@ -272,47 +315,31 @@ export function ExplorePanel({ open, onClose, editorRef, onScheduleSave, session
           const importForm = new FormData()
           importForm.append('url', item.media_url)
           const importResponse = await fetch('/api/import-image', { method: 'POST', body: importForm })
-          const importData = await importResponse.json()
-          const imageUrl = importData.url || item.media_url
+          const importData = (await importResponse.json()) as { url?: string; error?: string }
+          if (!importResponse.ok || !importData.url) {
+            throw new Error(importData.error || 'Could not import reference image.')
+          }
+          const imageUrl = importData.url
 
           const dims = await loadImageDimensions(imageUrl)
-          const scale = Math.min(1, 340 / dims.width, 260 / dims.height)
-          const w = Math.round(dims.width * scale)
-          const h = Math.round(dims.height * scale)
-          const x = cx - w / 2 + (Math.random() * 32 - 16)
-          const y = cy - h / 2 + (Math.random() * 32 - 16)
-
-          const asset = AssetRecordType.create({
-            id: AssetRecordType.createId(),
-            type: 'image',
-            props: {
-              src: imageUrl,
-              w: dims.width,
-              h: dims.height,
-              mimeType: 'image/png',
-              name: `${item.title}.png`,
-              isAnimated: false,
-            },
+          const { x, y, width, height } = addImageReference(editor, {
+            src: imageUrl,
+            label: item.title,
+            width: dims.width,
+            height: dims.height,
+            tags: [...item.extracted_tags],
           })
-          editor.createAssets([asset])
-
-          editor.createShape({
-            type: 'image-ref',
-            x,
-            y,
-            props: { url: imageUrl, assetId: asset.id, label: item.title, tags: [...item.extracted_tags], w, h },
-          } as Parameters<Editor['createShape']>[0])
 
           if (item.palette.length > 0) {
             editor.createShape({
               type: 'swatch',
               x: x - 10,
-              y: y + h + 14,
-              props: { colors: item.palette, w: Math.max(200, w), h: 56 },
+              y: y + height + 14,
+              props: { colors: item.palette, w: Math.max(200, width), h: 56 },
             } as Parameters<Editor['createShape']>[0])
           }
-        } catch {
-          // fallback to note
+        } catch (error) {
+          setVibeSearchError(error instanceof Error ? error.message : 'Could not add this reference.')
           editor.createShape({
             type: 'moodboard-note',
             x: cx - 130,
@@ -410,7 +437,7 @@ export function ExplorePanel({ open, onClose, editorRef, onScheduleSave, session
         if (!editor) return
 
         const viewport = editor.getViewportPageBounds()
-        let offsetX = viewport.x + viewport.w / 2 - 200
+        const offsetX = viewport.x + viewport.w / 2 - 200
         let offsetY = viewport.y + viewport.h / 2 - 150
 
         if (template.brief) {
@@ -606,6 +633,12 @@ export function ExplorePanel({ open, onClose, editorRef, onScheduleSave, session
               {vibeSearching ? 'Searching…' : 'Search Vibe'}
             </button>
           </div>
+
+          {vibeSearchError && (
+            <p role="alert" className="m-0 rounded-lg bg-red-50 px-3 py-2 text-[11px] text-red-700">
+              {vibeSearchError}
+            </p>
+          )}
 
           {/* Test Switcher: Option A (Direct) vs Option B (AI Vibe-Adapted) */}
           <div className="flex items-center justify-between gap-1 rounded-xl border border-slate-200 bg-slate-100 p-1">

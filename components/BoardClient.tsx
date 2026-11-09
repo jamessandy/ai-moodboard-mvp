@@ -19,9 +19,10 @@ import {
   cleanSourceRole,
   cleanTags,
   isMoodboardDocument,
+  selectBoardSnapshot,
 } from '@/lib/board'
 import { StoredBoard } from '@/lib/boards'
-import { extractForegroundWithGrabCut } from '@/lib/grabcut'
+import { extractSubjectClient } from '@/lib/local-extract'
 import { APP_NAME, getBrowserAppUrl } from '@/lib/site'
 import { createBrowserSupabaseClient } from '@/lib/supabase/client'
 import { IMAGES_PER_GENERATION } from '@/lib/usage-constants'
@@ -128,6 +129,25 @@ function defaultSourceName(payload: { file?: File; url?: string }, index: number
 
 function sourceReferenceLabel(source: SourceImage, index: number) {
   return cleanReferenceName(source.name, `source ${index + 1}`)
+}
+
+function imageMimeType(src: string) {
+  const dataUrlMime = src.match(/^data:(image\/[a-z\d.+-]+);base64,/i)?.[1]
+  if (dataUrlMime) return dataUrlMime.toLowerCase()
+
+  const path = (() => {
+    try {
+      return new URL(src, window.location.origin).pathname
+    } catch {
+      return src
+    }
+  })()
+  const extension = path.match(/\.([a-z\d]+)$/i)?.[1]?.toLowerCase()
+  if (extension === 'jpg' || extension === 'jpeg') return 'image/jpeg'
+  if (extension === 'webp') return 'image/webp'
+  if (extension === 'gif') return 'image/gif'
+  if (extension === 'avif') return 'image/avif'
+  return 'image/png'
 }
 
 function loadImageDimensions(src: string) {
@@ -253,6 +273,7 @@ export function BoardClient() {
   const boardRef = useRef<StoredBoard | null>(null)
   const initialSnapshotRef = useRef<TLEditorSnapshot | TLStoreSnapshot | undefined>(undefined)
   const hydratedBoardIdRef = useRef<string | null>(null)
+  const syncPreservedSnapshotBoardIdRef = useRef<string | null>(null)
   const suppressSaveRef = useRef(false)
   const [brief, setBrief] = useState('')
   const briefRef = useRef('')
@@ -448,6 +469,7 @@ export function BoardClient() {
     boardRef.current = null
     initialSnapshotRef.current = undefined
     hydratedBoardIdRef.current = null
+    syncPreservedSnapshotBoardIdRef.current = null
     setBoardRecord(null)
     setQuota(null)
     chatMessagesRef.current = []
@@ -457,6 +479,21 @@ export function BoardClient() {
 
   const applyStoredBoard = useCallback((board: StoredBoard) => {
     const storedChat = getStoredChatMessages(board.document)
+    const rawSnapshot = getStoredTldrawSnapshot(board.document)
+    const editor = editorRef.current
+    const currentSnapshot = editor?.store.getStoreSnapshot('document')
+    const selection = selectBoardSnapshot(rawSnapshot, currentSnapshot)
+    const preserveCurrent = selection.preserveCurrent && isTldrawSnapshot(selection.snapshot)
+    if (preserveCurrent) {
+      initialSnapshotRef.current = migrateMoodboardNoteSnapshot(
+        selection.snapshot as TLEditorSnapshot | TLStoreSnapshot
+      )
+      syncPreservedSnapshotBoardIdRef.current = board.id
+    } else {
+      initialSnapshotRef.current = undefined
+      syncPreservedSnapshotBoardIdRef.current = null
+    }
+
     boardRef.current = board
     setBoardRecord(board)
     setBrief(board.brief ?? '')
@@ -473,9 +510,7 @@ export function BoardClient() {
     chatMessagesRef.current = storedChat
     setChatMessages(storedChat)
 
-    const editor = editorRef.current
-    if (editor && isMoodboardDocument(board.document)) {
-      const rawSnapshot = getStoredTldrawSnapshot(board.document)
+    if (editor && isMoodboardDocument(board.document) && !preserveCurrent) {
       if (isTldrawSnapshot(rawSnapshot)) {
         const valid = migrateMoodboardNoteSnapshot(rawSnapshot as TLEditorSnapshot | TLStoreSnapshot)
         try {
@@ -954,57 +989,79 @@ export function BoardClient() {
       point?: { x: number; y: number }
     ) => {
       const editor = editorRef.current
-      if (!editor) return
+      if (!editor) {
+        setError('The canvas is still loading. Try adding this reference again.')
+        return
+      }
 
-      const intrinsicW = Math.max(1, input.width ?? 512)
-      const intrinsicH = Math.max(1, input.height ?? 512)
-      const scale = Math.min(1, 340 / intrinsicW, 260 / intrinsicH)
-      const w = Math.round(intrinsicW * scale)
-      const h = Math.round(intrinsicH * scale)
-      const label = cleanReferenceName(input.label, 'reference')
-      const fallback = editor.getViewportPageBounds().center
-      const x = (point?.x ?? fallback.x) - w / 2
-      const y = (point?.y ?? fallback.y) - h / 2
-      const asset = AssetRecordType.create({
-        id: AssetRecordType.createId(),
-        type: 'image',
-        props: {
-          src: input.imageUrl,
-          w: intrinsicW,
-          h: intrinsicH,
-          mimeType: 'image/png',
-          name: `${label}.png`,
-          isAnimated: false,
-        },
-      })
+      try {
+        const intrinsicW = Math.max(1, input.width ?? 512)
+        const intrinsicH = Math.max(1, input.height ?? 512)
+        const scale = Math.min(1, 340 / intrinsicW, 260 / intrinsicH)
+        const w = Math.round(intrinsicW * scale)
+        const h = Math.round(intrinsicH * scale)
+        const label = cleanReferenceName(input.label, 'reference')
+        const viewport = editor.getViewportPageBounds()
+        const viewportCenter = {
+          x: viewport.x + viewport.w / 2,
+          y: viewport.y + viewport.h / 2,
+        }
+        const center =
+          Number.isFinite(viewport.w) && viewport.w > 0 && Number.isFinite(viewport.h) && viewport.h > 0
+            ? viewportCenter
+            : editor.getViewportPageBounds().center
+        const imageCount = editor
+          .getCurrentPageShapes()
+          .filter((shape) => shape.type === 'image-ref' || shape.type === 'element').length
+        const offset = (imageCount % 8) * 28
+        const x = (point?.x ?? center.x + offset) - w / 2
+        const y = (point?.y ?? center.y + offset) - h / 2
+        const asset = AssetRecordType.create({
+          id: AssetRecordType.createId(),
+          type: 'image',
+          props: {
+            src: input.imageUrl,
+            w: intrinsicW,
+            h: intrinsicH,
+            mimeType: imageMimeType(input.imageUrl),
+            name: `${label}`,
+            isAnimated: false,
+          },
+        })
+        const shapeId = createShapeId()
 
-      editor.createAssets([asset])
-      const shapeId = createShapeId()
-      editor.createShape({
-        id: shapeId,
-        type: 'image-ref',
-        x,
-        y,
-        props: {
-          url: input.imageUrl,
-          assetId: asset.id,
-          label,
-          tags: [],
-          w,
-          h,
-        },
-      })
-      editor.setSelectedShapes([shapeId])
-      editor.zoomToSelection({ animation: { duration: 200 } })
-      scheduleSave()
-      captureClientEvent(
-        'add_reference',
-        {
-          source: input.source,
-          label,
-        },
-        sessionRef.current?.user.id
-      )
+        editor.run(() => {
+          editor.createAssets([asset])
+          editor.createShape({
+            id: shapeId,
+            type: 'image-ref',
+            x,
+            y,
+            props: {
+              url: input.imageUrl,
+              assetId: asset.id,
+              label,
+              tags: [],
+              w,
+              h,
+            },
+          })
+          editor.setSelectedShapes([shapeId])
+        })
+        editor.zoomToSelection({ animation: { duration: 200 } })
+        scheduleSave()
+        captureClientEvent(
+          'add_reference',
+          {
+            source: input.source,
+            label,
+          },
+          sessionRef.current?.user.id
+        )
+      } catch (caught) {
+        console.error('Failed to add image reference to canvas', caught)
+        setError(caught instanceof Error ? caught.message : 'Could not add this reference to the canvas.')
+      }
     },
     [scheduleSave]
   )
@@ -1268,7 +1325,7 @@ export function BoardClient() {
   const extractSource = async (source: SourceImage, action: 'subject' | 'describe') => {
     const prompt = extractPrompts[source.id]?.trim()
     if (action === 'describe' && !prompt) {
-      setError('Describe what to extract from the source.')
+      setError('Add a label for the extracted subject.')
       return
     }
 
@@ -1276,22 +1333,30 @@ export function BoardClient() {
     setExtractionState({ sourceId: source.id, action })
 
     try {
-      if (action === 'subject') {
-        const cutout = await extractForegroundWithGrabCut(source.url)
-        const formData = new FormData()
-        formData.append('file', new File([cutout.blob], 'grabcut-subject.png', { type: 'image/png' }))
-        const upload = await fetch('/api/import-image', { method: 'POST', body: formData })
-        const uploaded = (await upload.json().catch(() => null)) as { url?: string; error?: string } | null
-        if (!upload.ok || !uploaded?.url) throw new Error(uploaded?.error ?? 'Could not save the GrabCut result.')
+      if (action === 'subject' || action === 'describe') {
+        const extractedImage = await extractSubjectClient(source.url)
+        let imageUrl = extractedImage
+        if (extractedImage.startsWith('data:image/')) {
+          const imageBlob = await (await fetch(extractedImage)).blob()
+          const formData = new FormData()
+          formData.append('file', new File([imageBlob], 'local-subject.png', { type: 'image/png' }))
+          const upload = await fetch('/api/import-image', { method: 'POST', body: formData })
+          const uploaded = (await upload.json().catch(() => null)) as { url?: string; error?: string } | null
+          if (!upload.ok || !uploaded?.url) {
+            throw new Error(uploaded?.error ?? 'Could not save the locally extracted image.')
+          }
+          imageUrl = uploaded.url
+        }
 
+        const dimensions = await loadImageDimensions(imageUrl).catch(() => ({ width: 512, height: 512 }))
         createElementAtPoint({
-          imageUrl: uploaded.url,
-          label: cleanReferenceName(source.name, 'subject'),
+          imageUrl,
+          label: action === 'describe' ? prompt ?? 'element' : cleanReferenceName(source.name, 'subject'),
           sourceId: source.id,
-          width: cutout.width,
-          height: cutout.height,
+          width: dimensions.width,
+          height: dimensions.height,
         })
-        captureClientEvent('extract', { mode: 'subject', provider: 'browser-grabcut' }, sessionRef.current?.user.id)
+        captureClientEvent('extract', { mode: action, provider: 'local' }, sessionRef.current?.user.id)
         return
       }
 
@@ -2316,7 +2381,7 @@ export function BoardClient() {
                               onClick={() => void extractSource(source, 'subject')}
                               className="rounded-lg bg-[#0F0C59] px-2 py-1 text-[10px] font-bold text-white hover:bg-blue-900 disabled:opacity-40 shadow-xs"
                             >
-                              {busy && extractionState?.action === 'subject' ? 'Extracting…' : 'Extract Subject'}
+                              {busy && extractionState?.action === 'subject' ? 'Extracting locally…' : 'Extract Subject'}
                             </button>
                           </div>
 
@@ -2326,7 +2391,8 @@ export function BoardClient() {
                               onChange={(event) =>
                                 setExtractPrompts((current) => ({ ...current, [source.id]: event.target.value }))
                               }
-                              placeholder="e.g. the chair"
+                              placeholder="Label (e.g. chair)"
+                              title="Separates the foreground locally; this text is only used as its label."
                               className="h-6 min-w-0 flex-1 rounded-lg border border-slate-200 bg-white px-2 text-[11px] text-slate-800 placeholder-slate-400 outline-none focus:border-blue-500"
                             />
                             <button
@@ -2335,7 +2401,7 @@ export function BoardClient() {
                               onClick={() => void extractSource(source, 'describe')}
                               className="rounded-lg border border-slate-200 bg-white px-2 text-[10px] font-bold text-slate-700 hover:bg-slate-100 disabled:opacity-40"
                             >
-                              Extract
+                              {busy && extractionState?.action === 'describe' ? 'Extracting locally…' : 'Extract'}
                             </button>
                             <button
                               type="button"
@@ -2693,10 +2759,14 @@ export function BoardClient() {
                   const mountedBoardId = boardRecord?.id ?? null
                   let disposed = false
                   const markBoardHydrated = () => {
+                    suppressSaveRef.current = false
                     if (mountedBoardId && boardRef.current?.id === mountedBoardId) {
                       hydratedBoardIdRef.current = mountedBoardId
+                      if (syncPreservedSnapshotBoardIdRef.current === mountedBoardId) {
+                        syncPreservedSnapshotBoardIdRef.current = null
+                        void saveBoard()
+                      }
                     }
-                    suppressSaveRef.current = false
                   }
 
                   const fitCanvasContent = (attempts = 0) => {

@@ -130,3 +130,27 @@ export function isMoodboardDocument(document: unknown): document is MoodboardDoc
       'tldraw' in document
   )
 }
+
+function countSnapshotShapes(snapshot: unknown) {
+  if (!snapshot || typeof snapshot !== 'object' || !('store' in snapshot)) return 0
+  const store = (snapshot as { store?: unknown }).store
+  if (!store || typeof store !== 'object' || Array.isArray(store)) return 0
+
+  return Object.entries(store).filter(([id, record]) => {
+    if (id.startsWith('shape:')) return true
+    return Boolean(record && typeof record === 'object' && 'typeName' in record && record.typeName === 'shape')
+  }).length
+}
+
+export function selectBoardSnapshot(remoteSnapshot: unknown, currentSnapshot: unknown) {
+  const remoteShapeCount = countSnapshotShapes(remoteSnapshot)
+  const localShapeCount = countSnapshotShapes(currentSnapshot)
+  const preserveCurrent = remoteShapeCount === 0 && localShapeCount > 0
+
+  return {
+    snapshot: preserveCurrent ? currentSnapshot : remoteSnapshot,
+    preserveCurrent,
+    remoteShapeCount,
+    localShapeCount,
+  }
+}
