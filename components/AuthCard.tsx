@@ -322,3 +322,4 @@ export function AuthCard({ initialMode = 'login' }: AuthCardProps) {
     </main>
   )
 }
+

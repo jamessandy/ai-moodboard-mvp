@@ -2,7 +2,7 @@
 
 import { ChangeEvent, useCallback, useEffect, useMemo, useRef, useState } from 'react'
 import { Session } from '@supabase/supabase-js'
-import { AssetRecordType, Editor, Tldraw, TLEditorSnapshot, TLComponents, TLStoreSnapshot } from 'tldraw'
+import { AssetRecordType, Editor, Tldraw, TLEditorSnapshot, TLComponents, TLStoreSnapshot, createShapeId } from 'tldraw'
 import { moodboardShapeUtils } from '@/components/moodboardShapes'
 import { SceneOrbitModal } from '@/components/SceneOrbitModal'
 import { ExplorePanel } from '@/components/ExplorePanel'
@@ -401,6 +401,25 @@ export function BoardClient() {
     }
   }, [])
 
+  const handleZoomToFit = useCallback(() => {
+    const editor = editorRef.current
+    if (!editor) return
+    const shapes = editor.getCurrentPageShapes()
+    if (shapes.length > 0) {
+      editor.zoomToFit({ animation: { duration: 200 } })
+      if (shapes.length <= 8 && editor.getZoomLevel() < 0.5) {
+        const pageBounds = editor.getCurrentPageBounds()
+        if (pageBounds) {
+          editor.centerOnPoint({ x: pageBounds.center.x, y: pageBounds.center.y }, { animation: { duration: 200 } })
+          editor.resetZoom(editor.getViewportScreenCenter(), { animation: { duration: 200 } })
+        }
+      }
+    } else {
+      editor.resetZoom(editor.getViewportScreenCenter(), { animation: { duration: 200 } })
+    }
+    refreshCanvasStats()
+  }, [refreshCanvasStats])
+
   const isTldrawSnapshot = (document: unknown) =>
     Boolean(document && typeof document === 'object' && 'store' in document && 'schema' in document)
 
@@ -451,7 +470,37 @@ export function BoardClient() {
     )
     chatMessagesRef.current = storedChat
     setChatMessages(storedChat)
-  }, [])
+
+    const editor = editorRef.current
+    if (editor && isMoodboardDocument(board.document)) {
+      const rawSnapshot = getStoredTldrawSnapshot(board.document)
+      if (isTldrawSnapshot(rawSnapshot)) {
+        const valid = migrateMoodboardNoteSnapshot(rawSnapshot as TLEditorSnapshot | TLStoreSnapshot)
+        try {
+          suppressSaveRef.current = true
+          editor.loadSnapshot(valid)
+          window.setTimeout(() => {
+            const shapes = editor.getCurrentPageShapes()
+            if (shapes.length > 0) {
+              editor.zoomToFit({ animation: { duration: 0 } })
+              if (shapes.length <= 8 && editor.getZoomLevel() < 0.5) {
+                const pageBounds = editor.getCurrentPageBounds()
+                if (pageBounds) {
+                  editor.centerOnPoint({ x: pageBounds.center.x, y: pageBounds.center.y }, { animation: { duration: 0 } })
+                  editor.resetZoom(editor.getViewportScreenCenter(), { animation: { duration: 0 } })
+                }
+              }
+            }
+            suppressSaveRef.current = false
+            refreshCanvasStats()
+          }, 80)
+        } catch (e) {
+          console.warn('Failed to apply board snapshot to existing editor', e)
+          suppressSaveRef.current = false
+        }
+      }
+    }
+  }, [refreshCanvasStats])
 
   const loadBoard = useCallback(
     async (nextSession: Session) => {
@@ -855,7 +904,9 @@ export function BoardClient() {
       })
 
       editor.createAssets([asset])
+      const shapeId = createShapeId()
       editor.createShape({
+        id: shapeId,
         type: 'element',
         x,
         y,
@@ -869,6 +920,8 @@ export function BoardClient() {
           h,
         },
       })
+      editor.setSelectedShapes([shapeId])
+      editor.zoomToSelection({ animation: { duration: 200 } })
       scheduleSave()
       captureClientEvent(
         'add_to_board',
@@ -913,7 +966,9 @@ export function BoardClient() {
       })
 
       editor.createAssets([asset])
+      const shapeId = createShapeId()
       editor.createShape({
+        id: shapeId,
         type: 'image-ref',
         x,
         y,
@@ -926,6 +981,8 @@ export function BoardClient() {
           h,
         },
       })
+      editor.setSelectedShapes([shapeId])
+      editor.zoomToSelection({ animation: { duration: 200 } })
       scheduleSave()
       captureClientEvent(
         'add_reference',
@@ -1744,7 +1801,7 @@ export function BoardClient() {
     }
   }
 
-  if (!authReady) {
+  if (!authReady || (session && !boardRecord && saveState === 'loading')) {
     return (
       <main className="flex h-screen w-screen items-center justify-center bg-[#0B0838] text-[#FCECD5]">
         <div className="flex items-center gap-3 rounded-full border border-white/10 bg-[#120E6A]/60 px-5 py-2.5 backdrop-blur-xl shadow-2xl">
@@ -2164,36 +2221,149 @@ export function BoardClient() {
             </div>
           </div>
 
-          {/* Card 3: VARIATIONS FILMSTRIP & SCROLL (Swiss Cockpit) — Extends down the page */}
-          <div className="flex-1 min-h-0 rounded-2xl border border-[#E2E5EA] bg-white p-3 shadow-[0_2px_8px_rgba(0,0,0,0.04)] flex flex-col gap-2.5 overflow-hidden">
-            {/* Static Header Bar */}
-            <div className="flex items-center justify-between pb-2 border-b border-slate-100 shrink-0">
-              <div className="flex items-center gap-2">
-                <span className="font-mono text-[9px] font-bold uppercase tracking-widest text-slate-500">
-                  {sidebarTab === 'variations' ? 'VARIATIONS FILMSTRIP' : 'SOURCE STAGING TRAY'}
-                </span>
-                <span className="rounded bg-slate-100 border border-slate-200 px-1.5 py-0.2 font-mono text-[9px] font-bold text-[#D95D24]">
-                  {sidebarTab === 'variations'
-                    ? `${outputs.filter((o) => o.status === 'done').length} / 4 SLOTS`
-                    : `${sources.length} ASSETS`}
-                </span>
-              </div>
-
-              {/* Action Buttons */}
-              <div className="flex items-center gap-1.5">
-                {sources.length > 0 && (
+          {/* Card 3: REFERENCES & VARIATIONS FILMSTRIP (Swiss Cockpit) — Extends down the page */}
+          <div className="flex-1 min-h-0 rounded-2xl border border-[#E2E5EA] bg-white p-3 shadow-[0_2px_8px_rgba(0,0,0,0.04)] flex flex-col gap-2 overflow-hidden">
+            <div className="flex-1 min-h-0 overflow-y-auto scrollbar-thin pr-1 space-y-4">
+              {/* ── Section A: Staged References (Above) ── */}
+              <div className="flex flex-col gap-2">
+                <div className="flex items-center justify-between pb-1.5 border-b border-slate-100">
+                  <div className="flex items-center gap-2">
+                    <span className="font-mono text-[9px] font-bold uppercase tracking-widest text-slate-500">
+                      STAGED REFERENCES
+                    </span>
+                    <span className="rounded bg-slate-100 border border-slate-200 px-1.5 py-0.2 font-mono text-[9px] font-bold text-slate-700">
+                      {sources.length} ASSETS
+                    </span>
+                  </div>
                   <button
                     type="button"
-                    onClick={() => setSidebarTab((prev) => (prev === 'variations' ? 'sources' : 'variations'))}
-                    className="rounded-full border border-slate-200 bg-slate-50 px-2 py-0.5 font-mono text-[9px] font-bold text-slate-600 hover:bg-white hover:text-slate-900 transition shadow-2xs"
-                    title="Switch between Variations and Staged Sources"
+                    onClick={() => fileInputRef.current?.click()}
+                    className="rounded-full border border-slate-200 bg-slate-100 px-2.5 py-0.5 font-mono text-[9px] font-bold text-slate-700 hover:bg-slate-200 transition shadow-2xs"
                   >
-                    {sidebarTab === 'variations' ? `Sources (${sources.length})` : 'Variations'}
+                    + Upload
                   </button>
-                )}
+                </div>
 
-                {sidebarTab === 'variations' && (
-                  <>
+                {sources.length ? (
+                  <div className="space-y-2">
+                    {sources.map((source, index) => {
+                      const busy = extractionState?.sourceId === source.id
+                      return (
+                        <div key={source.id} className="rounded-xl border border-slate-200 bg-slate-50/80 p-2 text-xs flex flex-col gap-2">
+                          <div className="flex gap-2">
+                            {/* eslint-disable-next-line @next/next/no-img-element */}
+                            <img src={source.url} alt={source.name ?? ''} className="h-14 w-20 shrink-0 rounded-lg object-cover border border-slate-200" />
+                            <div className="flex flex-1 flex-col justify-between min-w-0">
+                              <div className="flex items-center gap-1">
+                                <input
+                                  value={source.name ?? ''}
+                                  onChange={(event) => updateSourceName(source.id, event.target.value)}
+                                  placeholder="Source name"
+                                  className="h-6 flex-1 rounded bg-white px-1.5 font-sans text-xs font-semibold text-slate-800 border border-slate-200 outline-none focus:border-blue-500 truncate"
+                                />
+                                <button
+                                  type="button"
+                                  disabled={busy}
+                                  onClick={() => deleteSource(source.id)}
+                                  className="h-6 w-6 rounded bg-red-100 text-red-600 hover:bg-red-200 text-[10px] flex items-center justify-center font-bold"
+                                  title="Delete source"
+                                >
+                                  ✕
+                                </button>
+                              </div>
+                              <div className="flex flex-wrap gap-1 mt-1">
+                                {SOURCE_ROLES.map((role) => {
+                                  const active = source.role === role
+                                  return (
+                                    <button
+                                      key={role}
+                                      type="button"
+                                      className={`rounded px-1.5 py-0.2 font-mono text-[9px] font-bold uppercase transition ${
+                                        active
+                                          ? 'bg-[#D95D24] text-white'
+                                          : 'bg-white text-slate-600 border border-slate-200 hover:bg-slate-100'
+                                      }`}
+                                      onClick={() => updateSourceRole(source.id, role)}
+                                    >
+                                      {role.slice(0, 4)}
+                                    </button>
+                                  )
+                                })}
+                              </div>
+                            </div>
+                          </div>
+
+                          <div className="grid grid-cols-2 gap-1.5">
+                            <button
+                              type="button"
+                              disabled={busy}
+                              onClick={() => void addSourceToBoard(source, index)}
+                              className="rounded-lg border border-slate-200 bg-white px-2 py-1 text-[10px] font-bold text-slate-700 hover:bg-slate-100 disabled:opacity-40 shadow-xs"
+                            >
+                              {busy && extractionState?.action === 'full' ? 'Adding…' : '+ Full Image'}
+                            </button>
+                            <button
+                              type="button"
+                              disabled={busy}
+                              onClick={() => void extractSource(source, 'subject')}
+                              className="rounded-lg bg-[#0F0C59] px-2 py-1 text-[10px] font-bold text-white hover:bg-blue-900 disabled:opacity-40 shadow-xs"
+                            >
+                              {busy && extractionState?.action === 'subject' ? 'Extracting…' : 'Extract Subject'}
+                            </button>
+                          </div>
+
+                          <div className="flex gap-1.5">
+                            <input
+                              value={extractPrompts[source.id] ?? ''}
+                              onChange={(event) =>
+                                setExtractPrompts((current) => ({ ...current, [source.id]: event.target.value }))
+                              }
+                              placeholder="e.g. the chair"
+                              className="h-6 min-w-0 flex-1 rounded-lg border border-slate-200 bg-white px-2 text-[11px] text-slate-800 placeholder-slate-400 outline-none focus:border-blue-500"
+                            />
+                            <button
+                              type="button"
+                              disabled={busy}
+                              onClick={() => void extractSource(source, 'describe')}
+                              className="rounded-lg border border-slate-200 bg-white px-2 text-[10px] font-bold text-slate-700 hover:bg-slate-100 disabled:opacity-40"
+                            >
+                              Extract
+                            </button>
+                            <button
+                              type="button"
+                              disabled={busy}
+                              onClick={() => void extractPalette(source)}
+                              className="rounded-lg border border-slate-200 bg-white px-2 text-[10px] font-bold text-slate-700 hover:bg-slate-100 disabled:opacity-40"
+                              title="Extract palette from source"
+                            >
+                              Palette
+                            </button>
+                          </div>
+                        </div>
+                      )
+                    })}
+                  </div>
+                ) : (
+                  <div className="flex h-20 flex-col items-center justify-center rounded-xl border border-dashed border-slate-200 bg-slate-50 p-2 text-center">
+                    <p className="font-mono text-xs font-semibold text-slate-600">No reference assets staged</p>
+                    <p className="mt-0.5 text-[10px] text-slate-400">Upload or drop image URLs above to extract cutouts.</p>
+                  </div>
+                )}
+              </div>
+
+              {/* ── Section B: Variations Filmstrip (Below) ── */}
+              <div className="flex flex-col gap-2 pt-2 border-t border-slate-200/80">
+                <div className="flex items-center justify-between pb-1.5 border-b border-slate-100">
+                  <div className="flex items-center gap-2">
+                    <span className="font-mono text-[9px] font-bold uppercase tracking-widest text-slate-500">
+                      VARIATIONS FILMSTRIP
+                    </span>
+                    <span className="rounded bg-slate-100 border border-slate-200 px-1.5 py-0.2 font-mono text-[9px] font-bold text-[#D95D24]">
+                      {outputs.filter((o) => o.status === 'done').length} / 4 SLOTS
+                    </span>
+                  </div>
+
+                  <div className="flex items-center gap-1.5">
                     <button
                       type="button"
                       onClick={() => setFilterModelOnly((prev) => !prev)}
@@ -2232,23 +2402,8 @@ export function BoardClient() {
                     >
                       <span className="text-[10px]">T</span>
                     </button>
-                  </>
-                )}
-
-                {sidebarTab === 'sources' && (
-                  <button
-                    type="button"
-                    onClick={() => fileInputRef.current?.click()}
-                    className="rounded-full border border-slate-200 bg-slate-100 px-2 py-0.5 font-mono text-[9px] font-bold text-slate-700 hover:bg-slate-200 transition"
-                  >
-                    + Upload
-                  </button>
-                )}
-              </div>
-            </div>
-
-            {sidebarTab === 'variations' ? (
-              <>
+                  </div>
+                </div>
                 {/* Compose Drawer if opened and output selected */}
                 {showComposeDrawer && selectedOutput && (
                   <div className="flex flex-col gap-2 bg-slate-50 rounded-xl p-2.5 border border-slate-200 shrink-0">
@@ -2442,115 +2597,8 @@ export function BoardClient() {
                     ))
                   )}
                 </div>
-              </>
-            ) : (
-              /* Staged Sources View */
-              <div className="flex-1 min-h-0 overflow-y-auto scrollbar-thin space-y-2.5 pr-0.5">
-                {sources.length ? (
-                  sources.map((source, index) => {
-                    const busy = extractionState?.sourceId === source.id
-                    return (
-                      <div key={source.id} className="rounded-xl border border-slate-200 bg-slate-50/80 p-2 text-xs flex flex-col gap-2">
-                        <div className="flex gap-2">
-                          {/* eslint-disable-next-line @next/next/no-img-element */}
-                          <img src={source.url} alt={source.name ?? ''} className="h-14 w-20 shrink-0 rounded-lg object-cover border border-slate-200" />
-                          <div className="flex flex-1 flex-col justify-between min-w-0">
-                            <div className="flex items-center gap-1">
-                              <input
-                                value={source.name ?? ''}
-                                onChange={(event) => updateSourceName(source.id, event.target.value)}
-                                placeholder="Source name"
-                                className="h-6 flex-1 rounded bg-white px-1.5 font-sans text-xs font-semibold text-slate-800 border border-slate-200 outline-none focus:border-blue-500 truncate"
-                              />
-                              <button
-                                type="button"
-                                disabled={busy}
-                                onClick={() => deleteSource(source.id)}
-                                className="h-6 w-6 rounded bg-red-100 text-red-600 hover:bg-red-200 text-[10px] flex items-center justify-center font-bold"
-                                title="Delete source"
-                              >
-                                ✕
-                              </button>
-                            </div>
-                            <div className="flex flex-wrap gap-1 mt-1">
-                              {SOURCE_ROLES.map((role) => {
-                                const active = source.role === role
-                                return (
-                                  <button
-                                    key={role}
-                                    type="button"
-                                    className={`rounded px-1.5 py-0.2 font-mono text-[9px] font-bold uppercase transition ${
-                                      active
-                                        ? 'bg-[#D95D24] text-white'
-                                        : 'bg-white text-slate-600 border border-slate-200 hover:bg-slate-100'
-                                    }`}
-                                    onClick={() => updateSourceRole(source.id, role)}
-                                  >
-                                    {role.slice(0, 4)}
-                                  </button>
-                                )
-                              })}
-                            </div>
-                          </div>
-                        </div>
-
-                        <div className="grid grid-cols-2 gap-1.5">
-                          <button
-                            type="button"
-                            disabled={busy}
-                            onClick={() => void addSourceToBoard(source, index)}
-                            className="rounded-lg border border-slate-200 bg-white px-2 py-1 text-[10px] font-bold text-slate-700 hover:bg-slate-100 disabled:opacity-40 shadow-xs"
-                          >
-                            {busy && extractionState?.action === 'full' ? 'Adding…' : '+ Full Image'}
-                          </button>
-                          <button
-                            type="button"
-                            disabled={busy}
-                            onClick={() => void extractSource(source, 'subject')}
-                            className="rounded-lg bg-[#0F0C59] px-2 py-1 text-[10px] font-bold text-white hover:bg-blue-900 disabled:opacity-40 shadow-xs"
-                          >
-                            {busy && extractionState?.action === 'subject' ? 'Extracting…' : 'Extract Subject'}
-                          </button>
-                        </div>
-
-                        <div className="flex gap-1.5">
-                          <input
-                            value={extractPrompts[source.id] ?? ''}
-                            onChange={(event) =>
-                              setExtractPrompts((current) => ({ ...current, [source.id]: event.target.value }))
-                            }
-                            placeholder="e.g. the chair"
-                            className="h-6 min-w-0 flex-1 rounded-lg border border-slate-200 bg-white px-2 text-[11px] text-slate-800 placeholder-slate-400 outline-none focus:border-blue-500"
-                          />
-                          <button
-                            type="button"
-                            disabled={busy}
-                            onClick={() => void extractSource(source, 'describe')}
-                            className="rounded-lg border border-slate-200 bg-white px-2 text-[10px] font-bold text-slate-700 hover:bg-slate-100 disabled:opacity-40"
-                          >
-                            Extract
-                          </button>
-                          <button
-                            type="button"
-                            disabled={busy}
-                            onClick={() => void extractPalette(source)}
-                            className="rounded-lg border border-slate-200 bg-white px-2 text-[10px] font-bold text-slate-700 hover:bg-slate-100 disabled:opacity-40"
-                            title="Extract palette from source"
-                          >
-                            Palette
-                          </button>
-                        </div>
-                      </div>
-                    )
-                  })
-                ) : (
-                  <div className="flex h-28 flex-col items-center justify-center rounded-xl border border-dashed border-slate-200 bg-slate-50 p-3 text-center">
-                    <p className="font-mono text-xs font-semibold text-slate-600">No source assets staged</p>
-                    <p className="mt-1 text-[10px] text-slate-400">Upload or drop image URLs above to extract cutouts.</p>
-                  </div>
-                )}
               </div>
-            )}
+            </div>
           </div>
         </aside>
 
@@ -2579,10 +2627,7 @@ export function BoardClient() {
             <div className="h-4 w-px bg-slate-200" />
             <button
               type="button"
-              onClick={() => {
-                editorRef.current?.zoomToFit()
-                refreshCanvasStats()
-              }}
+              onClick={handleZoomToFit}
               className="flex h-7 w-7 items-center justify-center rounded-full text-xs text-slate-700 hover:bg-slate-100 hover:text-slate-900 transition"
               title="Zoom to Fit"
             >
@@ -2638,20 +2683,47 @@ export function BoardClient() {
                 onMount={(editor) => {
                   editorRef.current = editor
                   let disposed = false
+
+                  const fitCanvasContent = (attempts = 0) => {
+                    if (disposed) return
+                    const container = editor.getContainer()
+                    const rect = container?.getBoundingClientRect()
+                    if ((!rect || rect.width < 100 || rect.height < 100) && attempts < 12) {
+                      window.setTimeout(() => fitCanvasContent(attempts + 1), 50)
+                      return
+                    }
+
+                    const shapes = editor.getCurrentPageShapes()
+                    if (shapes.length > 0) {
+                      editor.zoomToFit({ animation: { duration: 0 } })
+                      if (shapes.length <= 8 && editor.getZoomLevel() < 0.5) {
+                        const pageBounds = editor.getCurrentPageBounds()
+                        if (pageBounds) {
+                          editor.centerOnPoint({ x: pageBounds.center.x, y: pageBounds.center.y }, { animation: { duration: 0 } })
+                          editor.resetZoom(editor.getViewportScreenCenter(), { animation: { duration: 0 } })
+                        }
+                      }
+                    } else {
+                      editor.resetZoom(editor.getViewportScreenCenter(), { animation: { duration: 0 } })
+                    }
+                    suppressSaveRef.current = false
+                    refreshCanvasStats()
+                  }
+
                   if (tldrawSnapshot) {
                     suppressSaveRef.current = true
                     window.requestAnimationFrame(() => {
-                      if (disposed) return
-                      editor.zoomToFit()
-                      window.setTimeout(() => {
-                        if (disposed) return
-                        editor.zoomToFit()
-                        suppressSaveRef.current = false
-                        refreshCanvasStats()
-                      }, 160)
+                      fitCanvasContent()
                     })
+                  } else {
+                    refreshCanvasStats()
                   }
-                  const unlisten = editor.store.listen(() => scheduleSave(), { source: 'user', scope: 'document' })
+
+                  const unlisten = editor.store.listen(() => {
+                    scheduleSave()
+                    const zoom = Math.round(editor.getZoomLevel() * 100)
+                    setZoomLevelPercent((prev) => (prev !== zoom ? zoom : prev))
+                  })
                   refreshCanvasStats()
                   return () => {
                     disposed = true
@@ -2734,10 +2806,7 @@ export function BoardClient() {
               {/* Zoom to fit search icon */}
               <button
                 type="button"
-                onClick={() => {
-                  editorRef.current?.zoomToFit()
-                  refreshCanvasStats()
-                }}
+                onClick={handleZoomToFit}
                 className="flex h-7 w-7 items-center justify-center rounded-full text-slate-500 hover:bg-slate-100 hover:text-slate-800 transition"
                 title="Zoom to Fit"
               >
