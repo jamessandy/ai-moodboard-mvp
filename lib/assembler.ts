@@ -130,7 +130,7 @@ export async function compileBoardWithMetadata(
         .replace(/\s+/g, ' ')
         .trim(),
       image_urls,
-      model: 'fal-ai/nano-banana-pro/edit',
+      model: 'hf-spaces/black-forest-labs/FLUX.2-dev',
     },
     metadata: {
       palette: uniquePalette,

@@ -103,6 +103,29 @@ npm install
 npm run dev
 ```
 
+## MCP server for ChatGPT
+
+A lightweight MCP server is available at `mcp/server.ts` so ChatGPT-style clients can call a Moodblendy tool over stdio.
+
+```bash
+npm run mcp
+```
+
+Example MCP client config:
+
+```json
+{
+  "mcpServers": {
+    "moodblendy": {
+      "command": "npm",
+      "args": ["run", "mcp", "--", "--stdio"]
+    }
+  }
+}
+```
+
+The tool name is `moodblendy.create_board`. It accepts a brief, style, colors, references, and notes, then returns a structured prompt payload that the app can use for board generation.
+
 Open the printed local URL. For image upload, pasted URL import, clipboard image import, and generated output storage, configure the Supabase env vars first. For generation, also set `FAL_KEY`.
 
 Useful checks:
@@ -218,3 +241,21 @@ npm run fixtures
 ```
 
 This recompiles them into `fixtures/compiled` with a deterministic mock extracted palette, so assembler changes can be eyeballed without network access or generation spend.
+# Payments and credits
+
+Moodblendy uses Stripe Checkout with a Supabase-backed prepaid credit wallet. Apply
+`supabase/migrations/202608070001_credit_wallet_stripe.sql`, then configure:
+
+```env
+STRIPE_SECRET_KEY=sk_test_...
+STRIPE_WEBHOOK_SECRET=whsec_...
+CREDIT_MARKUP_MULTIPLIER=5
+APP_CREDITS_PER_USD=100
+FAL_COST_GENERATE_IMAGE_USD=0.15
+FAL_COST_EXTRACT_SUBJECT_USD=0.005
+FAL_COST_EXTRACT_DESCRIBE_USD=0.005
+FAL_COST_SAM_3D_OBJECTS_USD=0.02
+```
+
+For local webhooks, run `stripe listen --forward-to localhost:3000/api/stripe/webhook`.
+The webhook—not the Checkout redirect—grants purchased credits.

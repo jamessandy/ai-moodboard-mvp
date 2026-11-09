@@ -86,7 +86,7 @@ export type MoodboardDocument = {
 export interface CompiledRequest {
   prompt: string
   image_urls: string[]
-  model: 'fal-ai/nano-banana-pro/edit'
+  model: string
 }
 
 export const TAG_PHRASES: Record<Tag, string> = {

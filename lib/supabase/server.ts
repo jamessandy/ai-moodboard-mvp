@@ -3,6 +3,7 @@ import { createClient } from '@supabase/supabase-js'
 export const IMPORT_BUCKET = 'moodboard-imports'
 export const OUTPUT_BUCKET = 'moodboard-outputs'
 export const ELEMENT_BUCKET = 'moodboard-elements'
+export const ORBIT_BUCKET = 'moodboard-orbits'
 
 const knownMissingBucketStatuses = new Set(['400', '404'])
 

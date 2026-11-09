@@ -6,8 +6,20 @@
 
 :root {
   color-scheme: light;
-  --background: #f4f1ea;
-  --foreground: #171717;
+  --bg-shell: #EAECEF;
+  --bg-panel: #FFFFFF;
+  --bg-panel-subtle: #F8FAFC;
+  --border-panel: #E2E5E9;
+  --border-panel-highlight: #CBD5E1;
+  --accent-cream: #FCECD5;
+  --accent-cream-light: #FFF3E0;
+  --accent-terracotta: #D95D24;
+  --accent-terracotta-bright: #E06328;
+  --accent-cobalt: #0F0C59;
+  --accent-blue: #1D4ED8;
+  --text-cobalt: #0F0C59;
+  --background: #EAECEF;
+  --foreground: #0F172A;
 }
 
 * {
@@ -21,14 +33,88 @@ body {
 
 body {
   margin: 0;
-  background: var(--background);
+  background: var(--bg-shell);
   color: var(--foreground);
+  font-feature-settings: 'cv02', 'cv03', 'cv04', 'cv11';
+  overflow: hidden;
 }
 
+/* Studio Light / Dark Canvas Modes for tldraw */
+.canvas-light .tl-container {
+  --color-background: #FFFFFF !important;
+}
+
+.canvas-dark .tl-container {
+  --color-background: #0F172A !important;
+}
+
+/* Fallback default tldraw container */
 .tl-container {
-  --color-background: #fbfaf6;
+  --color-background: #FFFFFF;
+  transition: background-color 0.25s ease;
 }
 
+/* Industrial telemetry grid & dot patterns for Swiss Light Cockpit */
+.bg-telemetry-grid {
+  background-color: #EAECEF;
+  background-image:
+    linear-gradient(to right, rgba(15, 23, 42, 0.035) 1px, transparent 1px),
+    linear-gradient(to bottom, rgba(15, 23, 42, 0.035) 1px, transparent 1px);
+  background-size: 20px 20px;
+}
+
+.bg-telemetry-dots {
+  background-image: radial-gradient(rgba(15, 23, 42, 0.12) 1px, transparent 1px);
+  background-size: 14px 14px;
+}
+
+/* Custom scrollbars */
+.scrollbar-thin::-webkit-scrollbar {
+  width: 5px;
+  height: 5px;
+}
+
+.scrollbar-thin::-webkit-scrollbar-track {
+  background: rgba(0, 0, 0, 0.04);
+  border-radius: 9999px;
+}
+
+.scrollbar-thin::-webkit-scrollbar-thumb {
+  background: rgba(15, 23, 42, 0.2);
+  border-radius: 9999px;
+}
+
+.scrollbar-thin::-webkit-scrollbar-thumb:hover {
+  background: rgba(15, 23, 42, 0.35);
+}
+
+.scrollbar-none::-webkit-scrollbar {
+  display: none;
+}
+.scrollbar-none {
+  -ms-overflow-style: none;
+  scrollbar-width: none;
+}
+
+/* Glowing pulse indicator */
+@keyframes pulse-dot {
+  0%, 100% {
+    transform: scale(1);
+    opacity: 0.9;
+    box-shadow: 0 0 0 0 rgba(217, 93, 36, 0.7);
+  }
+  50% {
+    transform: scale(1.15);
+    opacity: 1;
+    box-shadow: 0 0 10px 4px rgba(217, 93, 36, 0.4);
+  }
+}
+
+.telemetry-pulse {
+  animation: pulse-dot 2.2s infinite ease-in-out;
+}
+
+/* Comment resolution logic */
 .hide-resolved-comments .comment-pin[data-resolved='true'] {
   display: none;
 }

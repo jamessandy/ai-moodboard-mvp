@@ -6,6 +6,6 @@
       "https://storage.example/neon-face.jpg",
       "https://storage.example/window-rain.jpg"
     ],
-    "model": "fal-ai/nano-banana-pro/edit"
+    "model": "hf-spaces/black-forest-labs/FLUX.2-dev"
   }
 }

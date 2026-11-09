@@ -6,6 +6,6 @@
       "https://storage.example/editorial-court.jpg",
       "https://storage.example/washed-denim.jpg"
     ],
-    "model": "fal-ai/nano-banana-pro/edit"
+    "model": "hf-spaces/black-forest-labs/FLUX.2-dev"
   }
 }

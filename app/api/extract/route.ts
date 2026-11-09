@@ -6,9 +6,12 @@ import {
   createServiceSupabaseClient,
   createServiceSupabaseClientWithBucket,
 } from '@/lib/supabase/server'
+import { getAuthenticatedUser } from '@/lib/supabase/auth'
+import { quoteFalAction } from '@/lib/credits/pricing'
+import { refundCredits, reserveCredits } from '@/lib/credits/wallet'
 
 export const runtime = 'nodejs'
-export const maxDuration = 60
+export const maxDuration = 300
 
 const MAX_EXTRACT_REQUESTS_PER_WINDOW = Number(process.env.MAX_EXTRACT_REQUESTS_PER_WINDOW ?? 8)
 const MAX_EXTRACTIONS_PER_USER = Number(process.env.MAX_EXTRACTIONS_PER_USER ?? 80)
@@ -16,6 +19,14 @@ const EXTRACT_RATE_LIMIT_WINDOW_MS = Number(process.env.EXTRACT_RATE_LIMIT_WINDO
 const EXTRACTION_TIMEOUT_MS = Number(process.env.EXTRACTION_TIMEOUT_MS ?? 180_000)
 const rateLimitBuckets = new Map<string, { count: number; resetAt: number }>()
 const extractionCounts = new Map<string, number>()
+
+function errorMessage(error: unknown) {
+  if (error instanceof Error) return error.message
+  if (error && typeof error === 'object' && 'message' in error && typeof error.message === 'string') {
+    return error.message
+  }
+  return 'Extraction failed.'
+}
 
 type ExtractRequest = {
   sourceUrl: string
@@ -71,21 +82,6 @@ function withTimeout<T>(promise: Promise<T>, timeoutMs: number, label: string) {
       setTimeout(() => reject(new Error(`${label} timed out after ${Math.round(timeoutMs / 1000)}s.`)), timeoutMs)
     }),
   ])
-}
-
-async function requesterKey(request: NextRequest) {
-  const authorization = request.headers.get('authorization')
-  const token = authorization?.match(/^Bearer\s+(.+)$/i)?.[1]
-
-  if (token) {
-    const supabase = createServiceSupabaseClient()
-    const { data } = await supabase.auth.getUser(token)
-    if (data.user) return `user:${data.user.id}`
-  }
-
-  const forwardedFor = request.headers.get('x-forwarded-for')?.split(',')[0]?.trim()
-  const realIp = request.headers.get('x-real-ip')?.trim()
-  return `ip:${forwardedFor || realIp || 'local'}`
 }
 
 function checkRateLimit(key: string) {
@@ -467,8 +463,11 @@ async function extractWithFal(body: ExtractRequest): Promise<CutoutResult> {
 }
 
 export async function POST(request: NextRequest) {
+  let reservation: { userId: string; amount: number; actionId: string } | null = null
   try {
-    const key = await requesterKey(request)
+    const { user, error: authError, unavailable } = await getAuthenticatedUser(request)
+    if (!user) return Response.json({ error: authError }, { status: unavailable ? 503 : 401 })
+    const key = `user:${user.id}`
     const retryAfter = checkRateLimit(key)
     if (retryAfter) {
       return Response.json(
@@ -487,6 +486,23 @@ export async function POST(request: NextRequest) {
       return Response.json({ error: 'Extraction cap reached.' }, { status: 429 })
     }
 
+    const actionType = body.mode === 'subject' ? 'extract_subject' : 'extract_describe'
+    const quote = quoteFalAction(actionType)
+    const actionId = crypto.randomUUID()
+    const supabase = createServiceSupabaseClient()
+    const isDevUnlimited = process.env.NODE_ENV !== 'production'
+    const creditReservation = isDevUnlimited
+      ? { reserved: true, creditsBalance: Number.MAX_SAFE_INTEGER }
+      : await reserveCredits({
+          supabase, userId: user.id, amount: quote.credits, actionId, actionType,
+          metadata: { fal_model: 'fal-ai/evf-sam', fal_usd: quote.falUsd },
+        })
+    if (!creditReservation.reserved) return Response.json({
+      error: 'Not enough credits.', code: 'insufficient_credits', requiredCredits: quote.credits,
+      creditsBalance: creditReservation.creditsBalance,
+    }, { status: 402 })
+    if (!isDevUnlimited) reservation = { userId: user.id, amount: quote.credits, actionId }
+
     const cutout = await withTimeout(extractWithFal(body), EXTRACTION_TIMEOUT_MS, 'Extraction')
     const url = await withTimeout(storeElement(cutout), 30_000, 'Element storage')
     extractionCounts.set(key, used + 1)
@@ -494,9 +510,13 @@ export async function POST(request: NextRequest) {
       url,
       width: cutout.width,
       height: cutout.height,
+      creditsBalance: creditReservation.creditsBalance,
     })
   } catch (error) {
-    const message = error instanceof Error ? error.message : 'Extraction failed.'
-    return Response.json({ error: message }, { status: 500 })
+    if (reservation) await refundCredits({
+      supabase: createServiceSupabaseClient(), userId: reservation.userId, amount: reservation.amount,
+      actionId: reservation.actionId, actionType: 'extract', metadata: { reason: 'failed_action' },
+    }).catch(() => null)
+    return Response.json({ error: errorMessage(error) }, { status: 500 })
   }
 }

@@ -6,6 +6,6 @@
       "https://storage.example/black-leather.jpg",
       "https://storage.example/silver-hardware.jpg"
     ],
-    "model": "fal-ai/nano-banana-pro/edit"
+    "model": "hf-spaces/black-forest-labs/FLUX.2-dev"
   }
 }
