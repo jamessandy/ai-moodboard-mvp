@@ -8,6 +8,7 @@ import {
   Tldraw,
   TLEditorSnapshot,
   TLComponents,
+  TLStore,
   TLStoreSnapshot,
   TldrawProps,
   createShapeId,
@@ -398,6 +399,9 @@ export function BoardClient() {
   const tldrawComponents = useMemo<TLComponents>(
     () => ({
       StylePanel: null,
+      PageMenu: null,
+      MainMenu: null,
+      NavigationPanel: null,
       Toolbar: isToolbarCollapsed ? null : undefined,
     }),
     [isToolbarCollapsed]
@@ -499,10 +503,16 @@ export function BoardClient() {
     if (valid) initialSnapshotRef.current = valid
     return valid
   }, [boardRecord])
-  const canvasStore = useMemo(
-    () => createTLStore({ shapeUtils: storeShapeUtils, snapshot: tldrawSnapshot }),
-    [storeShapeUtils, tldrawSnapshot]
-  )
+
+  const storeRef = useRef<{ boardId: string | null; store: TLStore } | null>(null)
+  const currentBoardId = boardRecord?.id ?? null
+  if (!storeRef.current || storeRef.current.boardId !== currentBoardId) {
+    storeRef.current = {
+      boardId: currentBoardId,
+      store: createTLStore({ shapeUtils: storeShapeUtils, snapshot: tldrawSnapshot }),
+    }
+  }
+  const canvasStore = storeRef.current.store
 
   const setSourceList = (nextSources: SourceImage[]) => {
     sourcesRef.current = nextSources
@@ -2471,10 +2481,10 @@ export function BoardClient() {
         </div>
       </header>
 
-      {/* ── ZONE B: MAIN 3-COLUMN BENTO WORKSPACE (flex-1 grid grid-cols-12 gap-3 min-h-0) ── */}
-      <section className="flex-1 grid grid-cols-12 gap-3 min-h-0 overflow-hidden">
+      {/* ── ZONE B: MAIN 3-COLUMN BENTO WORKSPACE (Responsive Flex Cockpit) ── */}
+      <section className="flex-1 flex flex-col md:flex-row gap-3 min-h-0 overflow-hidden w-full h-full">
         {/* ── LEFT BENTO COLUMN: Source Telemetry & Vibe DNA (Swiss Cockpit) ── */}
-        <aside className="col-span-12 lg:col-span-3 flex flex-col gap-3 min-h-0 overflow-hidden">
+        <aside className="w-full md:w-72 lg:w-80 shrink-0 flex flex-col gap-3 min-h-0 h-full overflow-hidden max-md:max-h-[38vh]">
           {/* Card 1: SOURCE TELEMETRY & INGEST */}
           <div className="rounded-2xl border border-[#E2E5EA] bg-white p-3 shadow-[0_2px_8px_rgba(0,0,0,0.04)] flex flex-col gap-2 shrink-0">
             <div className="flex items-center justify-between">
@@ -2958,9 +2968,7 @@ export function BoardClient() {
         </aside>
 
         {/* ── CENTER BENTO COLUMN: The Moodboard Stage (Swiss Cockpit) ── */}
-        <section className={`col-span-12 ${
-          explorePanelOpen ? 'lg:col-span-6' : 'lg:col-span-9'
-        } flex flex-col rounded-2xl border border-[#E2E5EA] bg-white overflow-hidden relative shadow-[0_2px_12px_rgba(0,0,0,0.04)] min-h-0`}>
+        <section className="flex-1 min-w-0 h-full flex flex-col rounded-2xl border border-[#E2E5EA] bg-white overflow-hidden relative shadow-[0_2px_12px_rgba(0,0,0,0.04)] min-h-[320px]">
           {/* Stage Top-Left Glass Pill (Undo, Redo, Zoom to Fit, Tools) */}
           <div className="absolute top-3 left-3 z-30 flex items-center gap-1 rounded-full border border-slate-200 bg-white/95 p-1 backdrop-blur-md shadow-sm">
             <button
@@ -3027,7 +3035,7 @@ export function BoardClient() {
           </div>
 
           {/* Main Tldraw Canvas Container */}
-          <div className={`relative min-w-0 flex-1 h-full w-full ${canvasTheme === 'dark' ? 'canvas-dark' : 'canvas-light'}`}>
+          <div className={`relative min-w-0 flex-1 h-full w-full min-h-[300px] ${canvasTheme === 'dark' ? 'canvas-dark' : 'canvas-light'}`}>
             <div className={`absolute inset-0 ${showResolvedComments ? '' : 'hide-resolved-comments'}`}>
               <StableMoodboardCanvas
                 key={boardRecord?.id ?? 'anonymous'}
@@ -3148,7 +3156,7 @@ export function BoardClient() {
 
         {/* ── RIGHT BENTO COLUMN: Docked Explore & Creative Resource Directory ── */}
         {explorePanelOpen && (
-          <aside className="col-span-12 lg:col-span-3 flex flex-col rounded-2xl border border-[#E2E5EA] bg-white shadow-[0_2px_8px_rgba(0,0,0,0.04)] p-3 min-h-0 overflow-hidden">
+          <aside className="w-full md:w-72 lg:w-80 shrink-0 flex flex-col rounded-2xl border border-[#E2E5EA] bg-white shadow-[0_2px_8px_rgba(0,0,0,0.04)] p-3 min-h-0 h-full overflow-hidden">
             <ExplorePanel
               open={true}
               docked={true}
