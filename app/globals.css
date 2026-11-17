@@ -1,5 +1,3 @@
-@import 'tldraw/tldraw.css';
-
 @tailwind base;
 @tailwind components;
 @tailwind utilities;
@@ -39,50 +37,32 @@ body {
   overflow: hidden;
 }
 
-/* Studio Light / Dark Canvas Modes for tldraw & guaranteed layer visibility */
+/* Native Studio Light / Indigo Canvas grid themes */
 .canvas-light,
 .canvas-dark {
-  visibility: visible !important;
-  opacity: 1 !important;
-  display: flex !important;
-  flex: 1 1 auto !important;
-  height: 100% !important;
-  min-height: 350px !important;
-  content-visibility: visible !important;
+  height: 100%;
+  min-height: 100%;
+  background-size: 24px 24px;
+  transition: background-color 180ms ease;
 }
 
-.canvas-light .tl-container {
-  --color-background: #FFFFFF !important;
+.canvas-light {
+  background-color: #fff;
+  background-image:
+    linear-gradient(rgba(15, 23, 42, 0.045) 1px, transparent 1px),
+    linear-gradient(90deg, rgba(15, 23, 42, 0.045) 1px, transparent 1px);
 }
 
-.canvas-dark .tl-container {
-  --color-background: #0F172A !important;
+.canvas-dark {
+  background-color: #0f172a;
+  background-image:
+    linear-gradient(rgba(148, 163, 184, 0.08) 1px, transparent 1px),
+    linear-gradient(90deg, rgba(148, 163, 184, 0.08) 1px, transparent 1px);
 }
 
-/* Fallback default tldraw container & canvas surface */
-.tl-container {
-  --color-background: #FFFFFF;
-  visibility: visible !important;
-  opacity: 1 !important;
-  height: 100% !important;
-  min-height: 350px !important;
-  content-visibility: visible !important;
-  transition: background-color 0.25s ease;
-}
-
-/* Primary drawing layer (the canvas rendering surface) must always be rendered as block and visible */
-.tl-container > :first-child,
-.tl-container .tl-canvas,
-.tl-container .tl-canvas > * {
-  display: block !important;
-  visibility: visible !important;
-  opacity: 1 !important;
-  content-visibility: visible !important;
-}
-
-.tl-container .tl-canvas {
-  height: 100% !important;
-  min-height: 350px !important;
+.native-canvas-world {
+  backface-visibility: hidden;
+  contain: layout style;
 }
 
 /* Industrial telemetry grid & dot patterns for Swiss Light Cockpit */

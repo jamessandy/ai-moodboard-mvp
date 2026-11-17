@@ -1,27 +1,20 @@
 'use client'
 
-import { ChangeEvent, memo, useCallback, useEffect, useMemo, useRef, useState } from 'react'
+import { ChangeEvent, useCallback, useEffect, useMemo, useRef, useState } from 'react'
 import { Session } from '@supabase/supabase-js'
-import {
-  AssetRecordType,
-  Editor,
-  Tldraw,
-  TLEditorSnapshot,
-  TLComponents,
-  TLStore,
-  TLStoreSnapshot,
-  TldrawProps,
-  createShapeId,
-  createTLStore,
-  defaultShapeUtils,
-} from 'tldraw'
-import { moodboardShapeUtils } from '@/components/moodboardShapes'
+import { NativeCanvas } from '@/components/NativeCanvas'
 import { SceneOrbitModal } from '@/components/SceneOrbitModal'
 import { ExplorePanel } from '@/components/ExplorePanel'
 import { AuthCard } from '@/components/AuthCard'
 import { captureClientEvent } from '@/lib/analytics/client'
-import { canvasContentIsVisible, focusCanvasContent } from '@/lib/canvas-camera'
-import { listenToCanvasChanges } from '@/lib/canvas-store'
+import {
+  CanvasShapeInput,
+  CanvasStore,
+  NativeCanvasDocument,
+  createCanvasId,
+  createCanvasStore,
+  listenToCanvasChanges,
+} from '@/lib/canvas-store'
 import {
   BoardDoc,
   ChatMessage,
@@ -33,7 +26,9 @@ import {
   cleanSourceRole,
   cleanTags,
   countSnapshotShapes,
+  getStoredCanvasSnapshot,
   isMoodboardDocument,
+  normalizeCanvasDocument,
   selectBoardSnapshot,
 } from '@/lib/board'
 import { BoardSummary, StoredBoard } from '@/lib/boards'
@@ -80,16 +75,6 @@ const DEFAULT_SWATCHES = [
   ['#0f172a', '#e11d48', '#f1f5f9'],
 ]
 
-const MOODBOARD_TLDRAW_OPTIONS = {
-  // Keep the canvas mounted while tldraw fetches its CDN fonts in the background.
-  maxFontsToLoadBeforeRender: 0,
-}
-
-const StableMoodboardCanvas = memo(function StableMoodboardCanvas(
-  props: Omit<TldrawProps, 'options'>
-) {
-  return <Tldraw {...props} options={MOODBOARD_TLDRAW_OPTIONS} />
-})
 const COMPOSE_POSITIONS: Array<{ id: ComposePosition; label: string; x: number; y: number }> = [
   { id: 'top-left', label: 'TL', x: 0.22, y: 0.22 },
   { id: 'top', label: 'T', x: 0.5, y: 0.22 },
@@ -155,25 +140,6 @@ function defaultSourceName(payload: { file?: File; url?: string }, index: number
 
 function sourceReferenceLabel(source: SourceImage, index: number) {
   return cleanReferenceName(source.name, `source ${index + 1}`)
-}
-
-function imageMimeType(src: string) {
-  const dataUrlMime = src.match(/^data:(image\/[a-z\d.+-]+);base64,/i)?.[1]
-  if (dataUrlMime) return dataUrlMime.toLowerCase()
-
-  const path = (() => {
-    try {
-      return new URL(src, window.location.origin).pathname
-    } catch {
-      return src
-    }
-  })()
-  const extension = path.match(/\.([a-z\d]+)$/i)?.[1]?.toLowerCase()
-  if (extension === 'jpg' || extension === 'jpeg') return 'image/jpeg'
-  if (extension === 'webp') return 'image/webp'
-  if (extension === 'gif') return 'image/gif'
-  if (extension === 'avif') return 'image/avif'
-  return 'image/png'
 }
 
 function loadImageDimensions(src: string) {
@@ -255,39 +221,6 @@ function getStoredChatMessages(document: unknown): ChatMessage[] {
     }))
 }
 
-function isRecordObject(value: unknown): value is Record<string, unknown> {
-  return Boolean(value && typeof value === 'object' && !Array.isArray(value))
-}
-
-function isLegacyMoodboardNoteRecord(record: unknown) {
-  if (!isRecordObject(record) || record.typeName !== 'shape' || record.type !== 'note') return false
-  if (!isRecordObject(record.props)) return false
-
-  return (
-    typeof record.props.text === 'string' &&
-    typeof record.props.w === 'number' &&
-    typeof record.props.h === 'number'
-  )
-}
-
-function migrateMoodboardNoteSnapshot(snapshot: TLEditorSnapshot | TLStoreSnapshot) {
-  if (!('store' in snapshot) || !isRecordObject(snapshot.store)) return snapshot
-
-  let changed = false
-  const nextStore: Record<string, unknown> = {}
-
-  for (const [id, record] of Object.entries(snapshot.store)) {
-    if (isLegacyMoodboardNoteRecord(record)) {
-      changed = true
-      nextStore[id] = { ...record, type: 'moodboard-note' }
-    } else {
-      nextStore[id] = record
-    }
-  }
-
-  return changed ? ({ ...snapshot, store: nextStore } as TLEditorSnapshot | TLStoreSnapshot) : snapshot
-}
-
 function summarizeBoard(board: StoredBoard): BoardSummary {
   const { id, title, brief, share_id, created_at, updated_at } = board
   return { id, title, brief, share_id, created_at, updated_at }
@@ -301,15 +234,14 @@ function boardDisplayName(board: BoardSummary | StoredBoard) {
 
 export function BoardClient() {
   const supabase = useMemo(() => createBrowserSupabaseClient(), [])
-  const tldrawLicenseKey = process.env.NEXT_PUBLIC_TLDRAW_LICENSE_KEY
-  const editorRef = useRef<Editor | null>(null)
+  const editorRef = useRef<CanvasStore | null>(null)
   const fileInputRef = useRef<HTMLInputElement | null>(null)
   const saveTimerRef = useRef<ReturnType<typeof setTimeout> | null>(null)
   const sessionRef = useRef<Session | null>(null)
   const boardLoadUserRef = useRef<string | null>(null)
   const pendingAuthMethodRef = useRef<string | null>(null)
   const boardRef = useRef<StoredBoard | null>(null)
-  const initialSnapshotRef = useRef<TLEditorSnapshot | TLStoreSnapshot | undefined>(undefined)
+  const initialSnapshotRef = useRef<NativeCanvasDocument | undefined>(undefined)
   const hydratedBoardIdRef = useRef<string | null>(null)
   const syncPreservedSnapshotBoardIdRef = useRef<string | null>(null)
   const saveBoardRef = useRef<(() => Promise<boolean>) | null>(null)
@@ -393,19 +325,6 @@ export function BoardClient() {
   const [generationModel, setGenerationModel] = useState<string>('hf-spaces/black-forest-labs/FLUX.2-dev')
   const generationModelRef = useRef(generationModel)
 
-  const shapeUtils = useMemo(() => moodboardShapeUtils, [])
-  const storeShapeUtils = useMemo(() => [...defaultShapeUtils, ...moodboardShapeUtils], [])
-  const [isToolbarCollapsed, setIsToolbarCollapsed] = useState(false)
-  const tldrawComponents = useMemo<TLComponents>(
-    () => ({
-      StylePanel: null,
-      PageMenu: null,
-      MainMenu: null,
-      NavigationPanel: null,
-      Toolbar: isToolbarCollapsed ? null : undefined,
-    }),
-    [isToolbarCollapsed]
-  )
   const selectedOutput = useMemo(
     () => outputs.find((output) => output.slot === selectedOutputSlot && output.status === 'done' && output.url),
     [outputs, selectedOutputSlot]
@@ -484,35 +403,28 @@ export function BoardClient() {
   const handleZoomToFit = useCallback(() => {
     const editor = editorRef.current
     if (!editor) return
-    focusCanvasContent(editor, 200)
-    window.setTimeout(refreshCanvasStats, 220)
+    editor.fitToContent()
+    refreshCanvasStats()
   }, [refreshCanvasStats])
 
-  const isTldrawSnapshot = (document: unknown) =>
-    Boolean(document && typeof document === 'object' && 'store' in document && 'schema' in document)
-
-  const getStoredTldrawSnapshot = (document: unknown) =>
-    isMoodboardDocument(document) ? document.tldraw : document
-
-  const tldrawSnapshot = useMemo(() => {
+  const initialCanvasDocument = useMemo(() => {
     if (initialSnapshotRef.current) return initialSnapshotRef.current
-    const snapshot = boardRecord ? getStoredTldrawSnapshot(boardRecord.document) : null
-    const valid = isTldrawSnapshot(snapshot)
-      ? migrateMoodboardNoteSnapshot(snapshot as TLEditorSnapshot | TLStoreSnapshot)
-      : undefined
-    if (valid) initialSnapshotRef.current = valid
-    return valid
+    const snapshot = boardRecord ? getStoredCanvasSnapshot(boardRecord.document) : null
+    const normalized = normalizeCanvasDocument(snapshot)
+    initialSnapshotRef.current = normalized
+    return normalized
   }, [boardRecord])
 
-  const storeRef = useRef<{ boardId: string | null; store: TLStore } | null>(null)
+  const storeRef = useRef<{ boardId: string | null; store: CanvasStore } | null>(null)
   const currentBoardId = boardRecord?.id ?? null
   if (!storeRef.current || storeRef.current.boardId !== currentBoardId) {
     storeRef.current = {
       boardId: currentBoardId,
-      store: createTLStore({ shapeUtils: storeShapeUtils, snapshot: tldrawSnapshot }),
+      store: createCanvasStore(initialCanvasDocument),
     }
   }
   const canvasStore = storeRef.current.store
+  editorRef.current = canvasStore
 
   const setSourceList = (nextSources: SourceImage[]) => {
     sourcesRef.current = nextSources
@@ -539,15 +451,13 @@ export function BoardClient() {
   const applyStoredBoard = useCallback((board: StoredBoard) => {
     const previousBoardId = boardRef.current?.id
     const storedChat = getStoredChatMessages(board.document)
-    const rawSnapshot = getStoredTldrawSnapshot(board.document)
+    const rawSnapshot = getStoredCanvasSnapshot(board.document)
     const editor = editorRef.current
     const sameHydratedBoard = previousBoardId === board.id && hydratedBoardIdRef.current === board.id
-    const currentSnapshot = sameHydratedBoard ? editor?.store.getStoreSnapshot('document') : undefined
+    const currentSnapshot = sameHydratedBoard ? editor?.getSnapshot() : undefined
     const selection = selectBoardSnapshot(rawSnapshot, currentSnapshot)
-    const validSnapshot = isTldrawSnapshot(selection.snapshot)
-      ? migrateMoodboardNoteSnapshot(selection.snapshot as TLEditorSnapshot | TLStoreSnapshot)
-      : undefined
-    const preserveCurrent = selection.preserveCurrent && Boolean(validSnapshot)
+    const validSnapshot = normalizeCanvasDocument(selection.snapshot)
+    const preserveCurrent = selection.preserveCurrent
     initialSnapshotRef.current = validSnapshot
     syncPreservedSnapshotBoardIdRef.current = preserveCurrent ? board.id : null
     if (previousBoardId !== board.id) hydratedBoardIdRef.current = null
@@ -573,23 +483,23 @@ export function BoardClient() {
 
     const currentShapes = editor?.getCurrentPageShapes() ?? []
     const hasLiveContent = currentShapes.length > 0
-    if (editor && previousBoardId === board.id && validSnapshot && !preserveCurrent && !hasLiveContent) {
+    if (editor && previousBoardId === board.id && !preserveCurrent && !hasLiveContent) {
       try {
         suppressSaveRef.current = true
         editor.loadSnapshot(validSnapshot)
-        window.setTimeout(() => {
+        window.requestAnimationFrame(() => {
           if (editorRef.current !== editor) return
-          focusCanvasContent(editor)
+          editor.fitToContent()
           suppressSaveRef.current = false
           refreshCanvasStats()
-        }, 80)
+        })
       } catch (e) {
         console.warn('Failed to apply board snapshot to existing editor', e)
         suppressSaveRef.current = false
       }
     } else if (previousBoardId !== board.id) {
-      suppressSaveRef.current = Boolean(validSnapshot)
-    } else if (!validSnapshot) {
+      suppressSaveRef.current = true
+    } else {
       suppressSaveRef.current = false
     }
     if (preserveCurrent && sameHydratedBoard) {
@@ -728,7 +638,7 @@ export function BoardClient() {
     ) return false
 
     const pageShapes = editor.getCurrentPageShapes()
-    const storedSnapshot = getStoredTldrawSnapshot(currentBoard.document)
+    const storedSnapshot = getStoredCanvasSnapshot(currentBoard.document)
     const previousShapesCount = countSnapshotShapes(storedSnapshot)
     if (pageShapes.length === 0 && previousShapesCount > 0) {
       console.warn('Skipping autosave: editor has 0 shapes while existing board has', previousShapesCount)
@@ -748,9 +658,9 @@ export function BoardClient() {
           title: briefRef.current.trim() || 'Untitled board',
           brief: briefRef.current,
           document: {
-            version: 2,
+            version: 3,
             sources: sourcesRef.current,
-            tldraw: editor.store.getStoreSnapshot('document'),
+            canvas: editor.getSnapshot(),
             chat: chatMessagesRef.current,
           },
         }),
@@ -799,61 +709,33 @@ export function BoardClient() {
     }, 900)
   }, [refreshCanvasStats, saveBoard])
 
-  const handleCanvasMount = useCallback((editor: Editor) => {
-    editorRef.current = editor
+  useEffect(() => {
+    const editor = canvasStore
+    editorRef.current = canvasStore
     const mountedBoardId = boardRecord?.id ?? null
-    let disposed = false
-    let fitAttempts = 0
-    let fitTimer: number | null = null
-
-    const markBoardHydrated = () => {
-      suppressSaveRef.current = false
-      if (mountedBoardId && boardRef.current?.id === mountedBoardId) {
-        hydratedBoardIdRef.current = mountedBoardId
-        if (syncPreservedSnapshotBoardIdRef.current === mountedBoardId) {
-          syncPreservedSnapshotBoardIdRef.current = null
-          void saveBoard()
-        }
+    suppressSaveRef.current = false
+    if (mountedBoardId && boardRef.current?.id === mountedBoardId) {
+      hydratedBoardIdRef.current = mountedBoardId
+      if (syncPreservedSnapshotBoardIdRef.current === mountedBoardId) {
+        syncPreservedSnapshotBoardIdRef.current = null
+        void saveBoard()
       }
     }
 
-    const fitCanvasContent = () => {
-      if (disposed) return
-      const focused = focusCanvasContent(editor)
-      if (!focused && fitAttempts < 12) {
-        fitAttempts++
-        fitTimer = window.setTimeout(fitCanvasContent, 60)
-        return
-      }
-      markBoardHydrated()
-      refreshCanvasStats()
-    }
-
-    if (tldrawSnapshot) {
-      suppressSaveRef.current = true
-      window.requestAnimationFrame(() => {
-        fitCanvasContent()
-      })
-    } else {
-      markBoardHydrated()
-      refreshCanvasStats()
-    }
-
-    const unlisten = listenToCanvasChanges(editor.store, {
+    const unlisten = listenToCanvasChanges(editor, {
       onDocumentChange: scheduleSave,
       onSessionChange: () => {
         const zoom = Math.round(editor.getZoomLevel() * 100)
         setZoomLevelPercent((prev) => (prev !== zoom ? zoom : prev))
       },
     })
-    refreshCanvasStats()
+    const refreshFrame = window.requestAnimationFrame(refreshCanvasStats)
     return () => {
-      disposed = true
+      window.cancelAnimationFrame(refreshFrame)
       unlisten()
-      if (fitTimer !== null) window.clearTimeout(fitTimer)
       if (editorRef.current === editor) editorRef.current = null
     }
-  }, [boardRecord?.id, refreshCanvasStats, saveBoard, scheduleSave, tldrawSnapshot])
+  }, [boardRecord?.id, canvasStore, refreshCanvasStats, saveBoard, scheduleSave])
 
   const saveBoardNow = useCallback(async () => {
     if (saveTimerRef.current) {
@@ -1128,14 +1010,14 @@ export function BoardClient() {
     captureClientEvent('share', { board_id: boardRecord.id }, sessionRef.current?.user.id)
   }
 
-  const createAtViewportCenter = useCallback((shape: Parameters<Editor['createShape']>[0]) => {
+  const createAtViewportCenter = useCallback((shape: CanvasShapeInput) => {
     const editor = editorRef.current
     if (!editor) return
 
     const viewport = editor.getViewportPageBounds()
     const x = viewport.x + viewport.w / 2 - 140 + Math.random() * 36
     const y = viewport.y + viewport.h / 2 - 90 + Math.random() * 36
-    editor.createShape({ ...shape, x, y } as Parameters<Editor['createShape']>[0])
+    editor.createShape({ ...shape, x, y })
   }, [])
 
   const dropCommentAtScreenPoint = useCallback(
@@ -1156,7 +1038,7 @@ export function BoardClient() {
           resolved: false,
           createdAt: new Date().toISOString(),
         },
-      } as Parameters<Editor['createShape']>[0])
+      })
       scheduleSave()
       setCommentMode(false)
     },
@@ -1176,29 +1058,16 @@ export function BoardClient() {
       const fallback = editor.getViewportPageBounds().center
       const x = (point?.x ?? fallback.x) - w / 2
       const y = (point?.y ?? fallback.y) - h / 2
-      const asset = AssetRecordType.create({
-        id: AssetRecordType.createId(),
-        type: 'image',
-        props: {
-          src: input.imageUrl,
-          w,
-          h,
-          mimeType: 'image/png',
-          name: `${input.label || 'element'}.png`,
-          isAnimated: false,
-        },
-      })
-
-      editor.createAssets([asset])
-      const shapeId = createShapeId()
+      const shapeId = createCanvasId('shape')
       editor.createShape({
         id: shapeId,
         type: 'element',
         x,
         y,
+        w,
+        h,
         props: {
           url: input.imageUrl,
-          assetId: asset.id,
           label: input.label || 'element',
           sourceId: input.sourceId,
           tags: [],
@@ -1207,7 +1076,7 @@ export function BoardClient() {
         },
       })
       editor.setSelectedShapes([shapeId])
-      editor.zoomToSelection({ animation: { duration: 200 } })
+      editor.zoomToSelection()
       scheduleSave()
       captureClientEvent(
         'add_to_board',
@@ -1227,10 +1096,7 @@ export function BoardClient() {
       point?: { x: number; y: number }
     ) => {
       const editor = editorRef.current
-      if (!editor) {
-        setError('The canvas is still loading. Try adding this reference again.')
-        return
-      }
+      if (!editor) return
 
       try {
         const intrinsicW = Math.max(1, input.width ?? 512)
@@ -1254,30 +1120,18 @@ export function BoardClient() {
         const offset = (imageCount % 8) * 28
         const x = (point?.x ?? center.x + offset) - w / 2
         const y = (point?.y ?? center.y + offset) - h / 2
-        const asset = AssetRecordType.create({
-          id: AssetRecordType.createId(),
-          type: 'image',
-          props: {
-            src: input.imageUrl,
-            w: intrinsicW,
-            h: intrinsicH,
-            mimeType: imageMimeType(input.imageUrl),
-            name: `${label}`,
-            isAnimated: false,
-          },
-        })
-        const shapeId = createShapeId()
+        const shapeId = createCanvasId('shape')
 
         editor.run(() => {
-          editor.createAssets([asset])
           editor.createShape({
             id: shapeId,
             type: 'image-ref',
             x,
             y,
+            w,
+            h,
             props: {
               url: input.imageUrl,
-              assetId: asset.id,
               label,
               tags: [],
               w,
@@ -1286,7 +1140,7 @@ export function BoardClient() {
           })
           editor.setSelectedShapes([shapeId])
         })
-        editor.zoomToSelection({ animation: { duration: 200 } })
+        editor.zoomToSelection()
         scheduleSave()
         captureClientEvent(
           'add_reference',
@@ -1541,10 +1395,6 @@ export function BoardClient() {
   const addSourceToBoard = useCallback(
     (source: SourceImage, index: number) => {
       setError(null)
-      if (!editorRef.current) {
-        setError('The canvas is still loading. Try adding this reference again.')
-        return
-      }
 
       try {
         createImageReferenceAtPoint({
@@ -2395,16 +2245,6 @@ export function BoardClient() {
 
         {/* Right: Utility & Account Capsule */}
         <div className="flex items-center gap-2">
-          {/* Drawing Tools Toggle */}
-          <button
-            type="button"
-            onClick={() => setIsToolbarCollapsed((prev) => !prev)}
-            className="group relative flex h-9 w-9 items-center justify-center rounded-full border border-slate-200 bg-white text-xs text-slate-700 transition hover:bg-slate-50 hover:text-slate-900 shadow-sm"
-            title={isToolbarCollapsed ? 'Expand drawing toolbox' : 'Collapse drawing toolbox'}
-          >
-            <span>{isToolbarCollapsed ? '✏️' : '✕'}</span>
-          </button>
-
           {/* Hide / Show Resolved comments */}
           <button
             type="button"
@@ -2481,10 +2321,10 @@ export function BoardClient() {
         </div>
       </header>
 
-      {/* ── ZONE B: MAIN 3-COLUMN BENTO WORKSPACE (Responsive Flex Cockpit) ── */}
-      <section className="flex-1 flex flex-col md:flex-row gap-3 min-h-0 overflow-hidden w-full h-full">
+      {/* ── ZONE B: MAIN 3-COLUMN BENTO WORKSPACE ── */}
+      <section className="grid flex-1 grid-cols-12 gap-3 min-h-0 overflow-y-auto lg:overflow-hidden w-full h-full lg:grid-rows-1">
         {/* ── LEFT BENTO COLUMN: Source Telemetry & Vibe DNA (Swiss Cockpit) ── */}
-        <aside className="w-full md:w-72 lg:w-80 shrink-0 flex flex-col gap-3 min-h-0 h-full overflow-hidden max-md:max-h-[38vh]">
+        <aside className="col-span-12 lg:col-span-3 xl:col-span-2 w-full flex flex-col gap-3 min-h-0 h-full overflow-hidden max-lg:max-h-[38vh]">
           {/* Card 1: SOURCE TELEMETRY & INGEST */}
           <div className="rounded-2xl border border-[#E2E5EA] bg-white p-3 shadow-[0_2px_8px_rgba(0,0,0,0.04)] flex flex-col gap-2 shrink-0">
             <div className="flex items-center justify-between">
@@ -2969,10 +2809,9 @@ export function BoardClient() {
 
         {/* ── CENTER BENTO COLUMN: The Moodboard Stage (Swiss Cockpit) ── */}
         <section
-          className="flex-1 min-w-0 h-full flex flex-col rounded-2xl border border-[#E2E5EA] bg-white overflow-hidden relative shadow-[0_2px_12px_rgba(0,0,0,0.04)] min-h-[350px]"
-          style={{ height: '100%', flex: '1 1 auto', minHeight: '350px', visibility: 'visible', opacity: 1 }}
+          className={`col-span-12 ${explorePanelOpen ? 'lg:col-span-6 xl:col-span-8' : 'lg:col-span-9 xl:col-span-10'} min-w-0 h-full flex flex-col rounded-2xl border border-[#E2E5EA] bg-white overflow-hidden relative shadow-[0_2px_12px_rgba(0,0,0,0.04)] min-h-[420px] lg:min-h-0`}
         >
-          {/* Stage Top-Left Glass Pill (Undo, Redo, Zoom to Fit, Tools) */}
+          {/* Stage Top-Left Glass Pill */}
           <div className="absolute top-3 left-3 z-30 flex items-center gap-1 rounded-full border border-slate-200 bg-white/95 p-1 backdrop-blur-md shadow-sm">
             <button
               type="button"
@@ -2998,14 +2837,6 @@ export function BoardClient() {
               title="Zoom to Fit"
             >
               ⊡
-            </button>
-            <button
-              type="button"
-              onClick={() => setIsToolbarCollapsed((prev) => !prev)}
-              className="flex h-7 px-2.5 items-center justify-center rounded-full text-[10px] font-mono font-bold text-slate-700 hover:bg-slate-100 hover:text-slate-900 transition"
-              title="Toggle drawing tools"
-            >
-              {isToolbarCollapsed ? '✏️ Tools' : '✕ Hide'}
             </button>
           </div>
 
@@ -3037,32 +2868,17 @@ export function BoardClient() {
             </button>
           </div>
 
-          {/* Main Tldraw Canvas Container */}
+          {/* Native transform canvas */}
           <div
-            className={`relative min-w-0 flex-1 h-full w-full min-h-[350px] ${canvasTheme === 'dark' ? 'canvas-dark' : 'canvas-light'}`}
-            style={{ height: '100%', flex: '1 1 auto', minHeight: '350px', visibility: 'visible', opacity: 1, display: 'flex' }}
+            className="relative min-w-0 flex-1 h-full w-full min-h-[420px] lg:min-h-0"
           >
-            <div
-              className={`absolute inset-0 w-full h-full ${showResolvedComments ? '' : 'hide-resolved-comments'}`}
-              style={{ height: '100%', width: '100%', minHeight: '350px', visibility: 'visible', opacity: 1 }}
-            >
-              <StableMoodboardCanvas
-                key={boardRecord?.id ?? 'anonymous'}
-                licenseKey={tldrawLicenseKey}
-                components={tldrawComponents}
-                shapeUtils={shapeUtils}
-                store={canvasStore}
-                onMount={handleCanvasMount}
-              />
-              {commentMode ? (
-                <button
-                  type="button"
-                  className="absolute inset-0 z-50 cursor-crosshair border-0 bg-transparent p-0"
-                  aria-label="Drop comment pin"
-                  onClick={(event) => dropCommentAtScreenPoint({ x: event.clientX, y: event.clientY })}
-                />
-              ) : null}
-            </div>
+            <NativeCanvas
+              store={canvasStore}
+              theme={canvasTheme}
+              showResolvedComments={showResolvedComments}
+              commentMode={commentMode}
+              onDropComment={dropCommentAtScreenPoint}
+            />
           </div>
 
           {/* Bottom-Center Floating Zoom Slider Bar (mirroring Image 3 below container) */}
@@ -3093,15 +2909,8 @@ export function BoardClient() {
                     const editor = editorRef.current
                     if (editor) {
                       const point = editor.getViewportScreenCenter()
-                      const currentCamera = editor.getCamera()
-                      const { x: cx, y: cy, z: cz } = currentCamera
-                      const { x, y } = point
                       const z = Math.max(0.25, Math.min(2, newZoom))
-                      editor.setCamera({
-                        x: cx + (x / z - x) - (x / cz - x),
-                        y: cy + (y / z - y) - (y / cz - y),
-                        z: z,
-                      })
+                      editor.zoomAtScreenPoint(z, point)
                       setZoomLevelPercent(Math.round(z * 100))
                     }
                   }}
@@ -3165,7 +2974,7 @@ export function BoardClient() {
 
         {/* ── RIGHT BENTO COLUMN: Docked Explore & Creative Resource Directory ── */}
         {explorePanelOpen && (
-          <aside className="w-full md:w-72 lg:w-80 shrink-0 flex flex-col rounded-2xl border border-[#E2E5EA] bg-white shadow-[0_2px_8px_rgba(0,0,0,0.04)] p-3 min-h-0 h-full overflow-hidden">
+          <aside className="col-span-12 lg:col-span-3 xl:col-span-2 w-full flex flex-col rounded-2xl border border-[#E2E5EA] bg-white shadow-[0_2px_8px_rgba(0,0,0,0.04)] p-3 min-h-0 h-full overflow-hidden">
             <ExplorePanel
               open={true}
               docked={true}

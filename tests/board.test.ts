@@ -1,6 +1,6 @@
 import assert from 'node:assert/strict'
 import test from 'node:test'
-import { selectBoardSnapshot } from '@/lib/board'
+import { normalizeCanvasDocument, selectBoardSnapshot } from '@/lib/board'
 
 function snapshot(shapeIds: string[]) {
   return {
@@ -75,4 +75,36 @@ test('preserves the mounted canvas over an equally sized remote refresh', () => 
 
   assert.equal(selection.snapshot, current)
   assert.equal(selection.preserveCurrent, true)
+})
+
+test('normalizes legacy records and resolves image assets into native nodes', () => {
+  const document = normalizeCanvasDocument(imageSnapshot(true))
+  assert.equal(document.version, 1)
+  assert.equal(document.nodes.length, 1)
+  assert.equal(document.nodes[0].type, 'image-ref')
+  assert.equal(document.nodes[0].props.url, 'https://example.com/image.png')
+  assert.ok(document.nodes[0].w >= 24)
+  assert.ok(document.nodes[0].h >= 24)
+})
+
+test('normalizes legacy note records and accepts native board documents', () => {
+  const legacy = snapshot(['note:1'])
+  legacy.store['shape:note:1'] = {
+    typeName: 'shape',
+    id: 'shape:note:1',
+    type: 'note',
+    x: 12,
+    y: 34,
+    props: { text: 'Legacy note', w: 240, h: 120 },
+  }
+  const converted = normalizeCanvasDocument(legacy)
+  assert.equal(converted.nodes[0].type, 'moodboard-note')
+  assert.equal(converted.nodes[0].props.text, 'Legacy note')
+
+  const native = {
+    version: 3,
+    sources: [],
+    canvas: { version: 1, nodes: [{ ...converted.nodes[0], id: 'shape:native' }] },
+  }
+  assert.equal(normalizeCanvasDocument(native).nodes[0].id, 'shape:native')
 })

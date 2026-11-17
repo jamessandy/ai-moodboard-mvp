@@ -1,9 +1,8 @@
 'use client'
 
 import { useCallback, useEffect, useMemo, useState } from 'react'
-import type { Editor } from 'tldraw'
-import { AssetRecordType, createShapeId } from 'tldraw'
 import { captureClientEvent } from '@/lib/analytics/client'
+import { CanvasStore, createCanvasId } from '@/lib/canvas-store'
 import {
   DIRECTORY_BRANCHES,
   DirectoryBranchId,
@@ -18,7 +17,7 @@ import { Tag, TAGS } from '@/lib/tags'
 type ExplorePanelProps = {
   open: boolean
   onClose: () => void
-  editorRef: React.RefObject<Editor | null>
+  editorRef: React.RefObject<CanvasStore | null>
   onScheduleSave: () => void
   sessionUserId?: string | null
   docked?: boolean
@@ -66,26 +65,8 @@ function loadImageDimensions(src: string) {
   })
 }
 
-function imageMimeType(src: string) {
-  const dataUrlMime = src.match(/^data:(image\/[a-z\d.+-]+);base64,/i)?.[1]
-  if (dataUrlMime) return dataUrlMime.toLowerCase()
-
-  const extension = (() => {
-    try {
-      return new URL(src, window.location.origin).pathname.match(/\.([a-z\d]+)$/i)?.[1]?.toLowerCase()
-    } catch {
-      return src.match(/\.([a-z\d]+)(?:\?|$)/i)?.[1]?.toLowerCase()
-    }
-  })()
-  if (extension === 'jpg' || extension === 'jpeg') return 'image/jpeg'
-  if (extension === 'webp') return 'image/webp'
-  if (extension === 'gif') return 'image/gif'
-  if (extension === 'avif') return 'image/avif'
-  return 'image/png'
-}
-
 function addImageReference(
-  editor: Editor,
+  editor: CanvasStore,
   input: { src: string; label: string; width: number; height: number; tags: Tag[] }
 ) {
   const intrinsicWidth = Math.max(1, input.width)
@@ -102,32 +83,21 @@ function addImageReference(
   const offset = (existingImageCount % 8) * 28
   const x = centerX - width / 2 + offset
   const y = centerY - height / 2 + offset
-  const asset = AssetRecordType.create({
-    id: AssetRecordType.createId(),
-    type: 'image',
-    props: {
-      src: input.src,
-      w: intrinsicWidth,
-      h: intrinsicHeight,
-      mimeType: imageMimeType(input.src),
-      name: input.label,
-      isAnimated: false,
-    },
-  })
-  const shapeId = createShapeId()
+  const shapeId = createCanvasId('shape')
 
   editor.run(() => {
-    editor.createAssets([asset])
     editor.createShape({
       id: shapeId,
       type: 'image-ref',
       x,
       y,
-      props: { url: input.src, assetId: asset.id, label: input.label, tags: input.tags, w: width, h: height },
-    } as Parameters<Editor['createShape']>[0])
+      w: width,
+      h: height,
+      props: { url: input.src, label: input.label, tags: input.tags, w: width, h: height },
+    })
     editor.setSelectedShapes([shapeId])
   })
-  editor.zoomToSelection({ animation: { duration: 200 } })
+  editor.zoomToSelection()
 
   return { x, y, width, height }
 }
@@ -274,7 +244,7 @@ export function ExplorePanel({ open, onClose, editorRef, onScheduleSave, session
         }
 
         const editor = editorRef.current
-        if (!editor) throw new Error('The canvas is still loading. Try again.')
+        if (!editor) throw new Error('The canvas is unavailable. Try again.')
         const dims = await loadImageDimensions(importData.url)
         addImageReference(editor, {
           src: importData.url,
@@ -336,7 +306,7 @@ export function ExplorePanel({ open, onClose, editorRef, onScheduleSave, session
               x: x - 10,
               y: y + height + 14,
               props: { colors: item.palette, w: Math.max(200, width), h: 56 },
-            } as Parameters<Editor['createShape']>[0])
+            })
           }
         } catch (error) {
           setVibeSearchError(error instanceof Error ? error.message : 'Could not add this reference.')
@@ -345,7 +315,7 @@ export function ExplorePanel({ open, onClose, editorRef, onScheduleSave, session
             x: cx - 130,
             y: cy - 40,
             props: { text: `${item.title}\n${item.extracted_tags.join(', ')}`, w: 260, h: 80 },
-          } as Parameters<Editor['createShape']>[0])
+          })
         }
       } else {
         // Add note + swatch
@@ -354,7 +324,7 @@ export function ExplorePanel({ open, onClose, editorRef, onScheduleSave, session
           x: cx - 130,
           y: cy - 60,
           props: { text: `Vibe: ${item.title}\nTags: ${item.extracted_tags.join(', ')}`, w: 260, h: 80 },
-        } as Parameters<Editor['createShape']>[0])
+        })
 
         if (item.palette.length > 0) {
           editor.createShape({
@@ -362,7 +332,7 @@ export function ExplorePanel({ open, onClose, editorRef, onScheduleSave, session
             x: cx - 130,
             y: cy + 30,
             props: { colors: item.palette, w: 260, h: 64 },
-          } as Parameters<Editor['createShape']>[0])
+          })
         }
       }
 
@@ -401,7 +371,7 @@ export function ExplorePanel({ open, onClose, editorRef, onScheduleSave, session
           x: cx - 120 + Math.random() * 20,
           y: cy - 46 + Math.random() * 20,
           props: { colors: palette, w: 240, h: 72 },
-        } as Parameters<Editor['createShape']>[0])
+        })
       }
 
       if (tags.length > 0) {
@@ -410,7 +380,7 @@ export function ExplorePanel({ open, onClose, editorRef, onScheduleSave, session
           x: cx - 120 + Math.random() * 20,
           y: cy + 40 + Math.random() * 20,
           props: { text: tags.join(', '), w: 240, h: 80 },
-        } as Parameters<Editor['createShape']>[0])
+        })
       }
 
       onScheduleSave()
@@ -446,7 +416,7 @@ export function ExplorePanel({ open, onClose, editorRef, onScheduleSave, session
             x: offsetX,
             y: offsetY,
             props: { text: template.brief, w: 300, h: 120 },
-          } as Parameters<Editor['createShape']>[0])
+          })
           offsetY += 140
         }
 
@@ -457,7 +427,7 @@ export function ExplorePanel({ open, onClose, editorRef, onScheduleSave, session
               x: offsetX,
               y: offsetY,
               props: { colors: swatch.colors, w: 240, h: 72 },
-            } as Parameters<Editor['createShape']>[0])
+            })
             offsetY += 90
           }
         }
@@ -468,7 +438,7 @@ export function ExplorePanel({ open, onClose, editorRef, onScheduleSave, session
             x: offsetX + 260,
             y: offsetY - 90,
             props: { label: sample.label, w: 320, h: 80 },
-          } as Parameters<Editor['createShape']>[0])
+          })
         }
 
         for (const note of template.notes ?? []) {
@@ -477,7 +447,7 @@ export function ExplorePanel({ open, onClose, editorRef, onScheduleSave, session
             x: offsetX + 320,
             y: offsetY,
             props: { text: note.text, w: 220, h: 100 },
-          } as Parameters<Editor['createShape']>[0])
+          })
           offsetY += 120
         }
 

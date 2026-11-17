@@ -13,7 +13,7 @@ export async function PATCH(request: NextRequest, context: { params: Promise<{ i
   const body = (await request.json()) as Partial<BoardSavePayload>
 
   if (!body.document) {
-    return Response.json({ error: 'Missing tldraw document snapshot.' }, { status: 400 })
+    return Response.json({ error: 'Missing canvas document snapshot.' }, { status: 400 })
   }
 
   const supabase = createServiceSupabaseClient()

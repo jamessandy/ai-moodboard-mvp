@@ -21,7 +21,7 @@ async function createBoard(ownerId: string, title: string) {
       owner_id: ownerId,
       title,
       brief: title === 'Untitled board' ? '' : title,
-      document: { version: 2, sources: [], tldraw: {}, chat: [] },
+      document: { version: 3, sources: [], canvas: { version: 1, nodes: [] }, chat: [] },
     })
     .select(BOARD_FIELDS)
     .single<StoredBoard>()

@@ -1,6 +1,6 @@
 # Moodblendy
 
-Moodblendy is a reference-driven AI moodboard app. The current model is sources -> elements -> composition: full source images live in a side rail, extracted transparent cutout elements populate the tldraw board, and generation composes from those elements plus swatches, type samples, notes, and the brief.
+Moodblendy is a reference-driven AI moodboard app. The current model is sources -> elements -> composition: full source images live in a side rail, extracted transparent cutout elements populate the native transform canvas, and generation composes from those elements plus swatches, type samples, notes, and the brief.
 
 ## Required environment variables
 
@@ -11,7 +11,6 @@ NEXT_PUBLIC_APP_URL=https://moodblendy.com
 NEXT_PUBLIC_SUPABASE_URL=
 NEXT_PUBLIC_SUPABASE_ANON_KEY=
 SUPABASE_SERVICE_ROLE_KEY=
-NEXT_PUBLIC_TLDRAW_LICENSE_KEY=
 NEXT_PUBLIC_POSTHOG_KEY=
 NEXT_PUBLIC_POSTHOG_HOST=https://us.i.posthog.com
 POSTHOG_SERVER_KEY=
@@ -28,7 +27,6 @@ EXTRACTION_TIMEOUT_MS=180000
 `SUPABASE_SERVICE_ROLE_KEY` is server-only and must not be exposed to the browser.
 `NEXT_PUBLIC_APP_URL` controls generated auth redirects, share links, and metadata. Set it to `https://moodblendy.com` in production.
 `GOOGLE_FONTS_API_KEY` is optional and only needed to resolve fonts by Google Fonts family name. Direct `.ttf`, `.otf`, and `.woff` font URLs work without it.
-Set `NEXT_PUBLIC_TLDRAW_LICENSE_KEY` before public deploy to remove the production license watermark.
 `NEXT_PUBLIC_POSTHOG_KEY` and `NEXT_PUBLIC_POSTHOG_HOST` enable client funnel events. `POSTHOG_SERVER_KEY` and `POSTHOG_HOST` are optional server-side overrides for API events; if omitted, server capture falls back to `NEXT_PUBLIC_POSTHOG_KEY`.
 
 ## Supabase setup.
@@ -154,12 +152,12 @@ Round 3 acceptance:
 - Swatch colors are injected directly into the assembled prompt.
 - Element cutout URLs are sent as generation references.
 - Users must sign up or log in before reaching the board. Email/password, Google OAuth, and magic links are supported.
-- Logged-in users can create, open, and switch between persisted boards. The active board autosaves its serialized tldraw document and brief.
+- Logged-in users can create, open, and switch between persisted boards. The active board autosaves its serialized native canvas document and brief.
 - Each user gets 10 free generated images. The remaining quota is shown in the UI and enforced in `/api/generate`.
 - The floating Chat widget turns conversational instructions into generation prompts, streams generated images into the thread, and can add any chat image back to the board.
 - Comment mode drops persisted `comment-pin` shapes on the canvas with replies, resolve controls, and a resolved-comment filter.
 - The Share control copies `https://moodblendy.com/b/[share_id]` when `NEXT_PUBLIC_APP_URL` is set for production.
-- Shared pages render the persisted tldraw document read-only, without edit controls or generation.
+- Shared pages render the persisted native canvas document read-only, without edit controls or generation.
 
 ## Generation route
 
@@ -193,7 +191,7 @@ Use fonts you are licensed to use. Google Fonts families are generally safe for 
 
 The floating Chat widget sends the current conversation plus a summary of the board to `POST /api/chat`. The route uses local app logic to turn recent user messages into a generation direction; there is no extra LLM provider or API key in this version. The client then reuses `POST /api/generate` with that prompt and the current board references, so the assembler, fal.ai model, storage, and add-to-board flow stay shared.
 
-Chat history is saved inside the board document as `chat`, alongside `sources` and `tldraw`, and reloads with the board.
+Chat history is saved inside the board document as `chat`, alongside `sources` and `canvas`, and reloads with the board.
 
 ## Analytics
 
@@ -211,7 +209,7 @@ Instrumented events:
 
 ## Comments
 
-The Comment toolbar toggle enables click-to-drop canvas comments. Each comment is a custom tldraw `comment-pin` shape with `{ author, text, replies, resolved, createdAt }`, so comments persist through the existing tldraw snapshot autosave. Resolved pins render dimmed and can be hidden with the resolved-comment filter.
+The Comment toolbar toggle enables click-to-drop canvas comments. Each comment is a native `comment-pin` node with `{ author, text, replies, resolved, createdAt }`, so comments persist through the canvas document autosave. Resolved pins render dimmed and can be hidden with the resolved-comment filter.
 
 ## Extraction routes
 
@@ -231,7 +229,7 @@ The browser uses `NEXT_PUBLIC_SUPABASE_ANON_KEY` only for Supabase Auth. Board p
 - `GET /api/public-board/[shareId]` reads a public shared board.
 - `/b/[shareId]` renders the share page read-only.
 
-The `document` column stores `{ version: 2, sources, tldraw }`, where `sources` are full source images for the side rail and `tldraw` is the serialized tldraw store snapshot.
+The `document` column stores `{ version: 3, sources, canvas }`, where `sources` are full source images for the side rail and `canvas` is the serialized native node document. Legacy version 2 records are normalized when loaded.
 
 ## Fixture harness
 
