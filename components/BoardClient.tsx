@@ -2968,7 +2968,10 @@ export function BoardClient() {
         </aside>
 
         {/* ── CENTER BENTO COLUMN: The Moodboard Stage (Swiss Cockpit) ── */}
-        <section className="flex-1 min-w-0 h-full flex flex-col rounded-2xl border border-[#E2E5EA] bg-white overflow-hidden relative shadow-[0_2px_12px_rgba(0,0,0,0.04)] min-h-[320px]">
+        <section
+          className="flex-1 min-w-0 h-full flex flex-col rounded-2xl border border-[#E2E5EA] bg-white overflow-hidden relative shadow-[0_2px_12px_rgba(0,0,0,0.04)] min-h-[350px]"
+          style={{ height: '100%', flex: '1 1 auto', minHeight: '350px', visibility: 'visible', opacity: 1 }}
+        >
           {/* Stage Top-Left Glass Pill (Undo, Redo, Zoom to Fit, Tools) */}
           <div className="absolute top-3 left-3 z-30 flex items-center gap-1 rounded-full border border-slate-200 bg-white/95 p-1 backdrop-blur-md shadow-sm">
             <button
@@ -3035,8 +3038,14 @@ export function BoardClient() {
           </div>
 
           {/* Main Tldraw Canvas Container */}
-          <div className={`relative min-w-0 flex-1 h-full w-full min-h-[300px] ${canvasTheme === 'dark' ? 'canvas-dark' : 'canvas-light'}`}>
-            <div className={`absolute inset-0 ${showResolvedComments ? '' : 'hide-resolved-comments'}`}>
+          <div
+            className={`relative min-w-0 flex-1 h-full w-full min-h-[350px] ${canvasTheme === 'dark' ? 'canvas-dark' : 'canvas-light'}`}
+            style={{ height: '100%', flex: '1 1 auto', minHeight: '350px', visibility: 'visible', opacity: 1, display: 'flex' }}
+          >
+            <div
+              className={`absolute inset-0 w-full h-full ${showResolvedComments ? '' : 'hide-resolved-comments'}`}
+              style={{ height: '100%', width: '100%', minHeight: '350px', visibility: 'visible', opacity: 1 }}
+            >
               <StableMoodboardCanvas
                 key={boardRecord?.id ?? 'anonymous'}
                 licenseKey={tldrawLicenseKey}

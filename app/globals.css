@@ -39,7 +39,18 @@ body {
   overflow: hidden;
 }
 
-/* Studio Light / Dark Canvas Modes for tldraw */
+/* Studio Light / Dark Canvas Modes for tldraw & guaranteed layer visibility */
+.canvas-light,
+.canvas-dark {
+  visibility: visible !important;
+  opacity: 1 !important;
+  display: flex !important;
+  flex: 1 1 auto !important;
+  height: 100% !important;
+  min-height: 350px !important;
+  content-visibility: visible !important;
+}
+
 .canvas-light .tl-container {
   --color-background: #FFFFFF !important;
 }
@@ -48,10 +59,30 @@ body {
   --color-background: #0F172A !important;
 }
 
-/* Fallback default tldraw container */
+/* Fallback default tldraw container & canvas surface */
 .tl-container {
   --color-background: #FFFFFF;
+  visibility: visible !important;
+  opacity: 1 !important;
+  height: 100% !important;
+  min-height: 350px !important;
+  content-visibility: visible !important;
   transition: background-color 0.25s ease;
+}
+
+/* Primary drawing layer (the canvas rendering surface) must always be rendered as block and visible */
+.tl-container > :first-child,
+.tl-container .tl-canvas,
+.tl-container .tl-canvas > * {
+  display: block !important;
+  visibility: visible !important;
+  opacity: 1 !important;
+  content-visibility: visible !important;
+}
+
+.tl-container .tl-canvas {
+  height: 100% !important;
+  min-height: 350px !important;
 }
 
 /* Industrial telemetry grid & dot patterns for Swiss Light Cockpit */
