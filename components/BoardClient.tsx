@@ -21,7 +21,7 @@ import {
   isMoodboardDocument,
   selectBoardSnapshot,
 } from '@/lib/board'
-import { StoredBoard } from '@/lib/boards'
+import { BoardSummary, StoredBoard } from '@/lib/boards'
 import { extractSubjectClient } from '@/lib/local-extract'
 import { APP_NAME, getBrowserAppUrl } from '@/lib/site'
 import { createBrowserSupabaseClient } from '@/lib/supabase/client'
@@ -262,6 +262,17 @@ function migrateMoodboardNoteSnapshot(snapshot: TLEditorSnapshot | TLStoreSnapsh
   return changed ? ({ ...snapshot, store: nextStore } as TLEditorSnapshot | TLStoreSnapshot) : snapshot
 }
 
+function summarizeBoard(board: StoredBoard): BoardSummary {
+  const { id, title, brief, share_id, created_at, updated_at } = board
+  return { id, title, brief, share_id, created_at, updated_at }
+}
+
+function boardDisplayName(board: BoardSummary | StoredBoard) {
+  const title = board.title?.trim()
+  const brief = board.brief?.trim()
+  return title && title !== 'Untitled board' ? title : brief || title || 'Untitled board'
+}
+
 export function BoardClient() {
   const supabase = useMemo(() => createBrowserSupabaseClient(), [])
   const tldrawLicenseKey = process.env.NEXT_PUBLIC_TLDRAW_LICENSE_KEY
@@ -269,12 +280,13 @@ export function BoardClient() {
   const fileInputRef = useRef<HTMLInputElement | null>(null)
   const saveTimerRef = useRef<ReturnType<typeof setTimeout> | null>(null)
   const sessionRef = useRef<Session | null>(null)
+  const boardLoadUserRef = useRef<string | null>(null)
   const pendingAuthMethodRef = useRef<string | null>(null)
   const boardRef = useRef<StoredBoard | null>(null)
   const initialSnapshotRef = useRef<TLEditorSnapshot | TLStoreSnapshot | undefined>(undefined)
   const hydratedBoardIdRef = useRef<string | null>(null)
   const syncPreservedSnapshotBoardIdRef = useRef<string | null>(null)
-  const saveBoardRef = useRef<(() => Promise<void>) | null>(null)
+  const saveBoardRef = useRef<(() => Promise<boolean>) | null>(null)
   const suppressSaveRef = useRef(false)
   const [brief, setBrief] = useState('')
   const briefRef = useRef('')
@@ -316,6 +328,9 @@ export function BoardClient() {
   const [creditModalOpen, setCreditModalOpen] = useState(false)
   const [checkoutLoading, setCheckoutLoading] = useState<string | null>(null)
   const [boardRecord, setBoardRecord] = useState<StoredBoard | null>(null)
+  const [boards, setBoards] = useState<BoardSummary[]>([])
+  const [boardMenuOpen, setBoardMenuOpen] = useState(false)
+  const [boardAction, setBoardAction] = useState<'idle' | 'creating' | 'opening'>('idle')
   const [saveState, setSaveState] = useState<SaveState>('idle')
   const [shareMessage, setShareMessage] = useState<string | null>(null)
   const [importState, setImportState] = useState<ImportState>('idle')
@@ -430,13 +445,6 @@ export function BoardClient() {
     const shapes = editor.getCurrentPageShapes()
     if (shapes.length > 0) {
       editor.zoomToFit({ animation: { duration: 200 } })
-      if (shapes.length <= 8 && editor.getZoomLevel() < 0.5) {
-        const pageBounds = editor.getCurrentPageBounds()
-        if (pageBounds) {
-          editor.centerOnPoint({ x: pageBounds.center.x, y: pageBounds.center.y }, { animation: { duration: 200 } })
-          editor.resetZoom(editor.getViewportScreenCenter(), { animation: { duration: 200 } })
-        }
-      }
     } else {
       editor.resetZoom(editor.getViewportScreenCenter(), { animation: { duration: 200 } })
     }
@@ -466,12 +474,15 @@ export function BoardClient() {
 
   const resetPersistedSession = useCallback(() => {
     sessionRef.current = null
+    boardLoadUserRef.current = null
     setSession(null)
     boardRef.current = null
     initialSnapshotRef.current = undefined
     hydratedBoardIdRef.current = null
     syncPreservedSnapshotBoardIdRef.current = null
     setBoardRecord(null)
+    setBoards([])
+    setBoardMenuOpen(false)
     setQuota(null)
     chatMessagesRef.current = []
     setChatMessages([])
@@ -479,24 +490,23 @@ export function BoardClient() {
   }, [])
 
   const applyStoredBoard = useCallback((board: StoredBoard) => {
+    const previousBoardId = boardRef.current?.id
     const storedChat = getStoredChatMessages(board.document)
     const rawSnapshot = getStoredTldrawSnapshot(board.document)
     const editor = editorRef.current
-    const sameHydratedBoard = hydratedBoardIdRef.current === board.id
+    const sameHydratedBoard = previousBoardId === board.id && hydratedBoardIdRef.current === board.id
     const currentSnapshot = sameHydratedBoard ? editor?.store.getStoreSnapshot('document') : undefined
     const selection = selectBoardSnapshot(rawSnapshot, currentSnapshot)
-    const preserveCurrent = selection.preserveCurrent && isTldrawSnapshot(selection.snapshot)
-    if (preserveCurrent) {
-      initialSnapshotRef.current = migrateMoodboardNoteSnapshot(
-        selection.snapshot as TLEditorSnapshot | TLStoreSnapshot
-      )
-      syncPreservedSnapshotBoardIdRef.current = board.id
-    } else {
-      initialSnapshotRef.current = undefined
-      syncPreservedSnapshotBoardIdRef.current = null
-    }
+    const validSnapshot = isTldrawSnapshot(selection.snapshot)
+      ? migrateMoodboardNoteSnapshot(selection.snapshot as TLEditorSnapshot | TLStoreSnapshot)
+      : undefined
+    const preserveCurrent = selection.preserveCurrent && Boolean(validSnapshot)
+    initialSnapshotRef.current = validSnapshot
+    syncPreservedSnapshotBoardIdRef.current = preserveCurrent ? board.id : null
+    if (previousBoardId !== board.id) hydratedBoardIdRef.current = null
 
     boardRef.current = board
+    window.localStorage.setItem('moodboard-current-board-id', board.id)
     setBoardRecord(board)
     setBrief(board.brief ?? '')
     briefRef.current = board.brief ?? ''
@@ -511,26 +521,29 @@ export function BoardClient() {
     )
     chatMessagesRef.current = storedChat
     setChatMessages(storedChat)
+    setOutputs([])
+    setSelectedOutputSlot(null)
 
-    if (editor && isMoodboardDocument(board.document) && !preserveCurrent) {
-      if (isTldrawSnapshot(rawSnapshot)) {
-        const valid = migrateMoodboardNoteSnapshot(rawSnapshot as TLEditorSnapshot | TLStoreSnapshot)
-        try {
-          suppressSaveRef.current = true
-          editor.loadSnapshot(valid)
-          window.setTimeout(() => {
-            const shapes = editor.getCurrentPageShapes()
-            if (shapes.length > 0) {
-              editor.zoomToFit({ animation: { duration: 0 } })
-            }
-            suppressSaveRef.current = false
-            refreshCanvasStats()
-          }, 80)
-        } catch (e) {
-          console.warn('Failed to apply board snapshot to existing editor', e)
+    if (editor && previousBoardId === board.id && validSnapshot && !preserveCurrent) {
+      try {
+        suppressSaveRef.current = true
+        editor.loadSnapshot(validSnapshot)
+        window.setTimeout(() => {
+          if (editorRef.current !== editor) return
+          if (editor.getCurrentPageShapes().length > 0) {
+            editor.zoomToFit({ animation: { duration: 0 } })
+          }
           suppressSaveRef.current = false
-        }
+          refreshCanvasStats()
+        }, 80)
+      } catch (e) {
+        console.warn('Failed to apply board snapshot to existing editor', e)
+        suppressSaveRef.current = false
       }
+    } else if (previousBoardId !== board.id) {
+      suppressSaveRef.current = Boolean(validSnapshot)
+    } else if (!validSnapshot) {
+      suppressSaveRef.current = false
     }
     if (preserveCurrent && sameHydratedBoard) {
       window.setTimeout(() => void saveBoardRef.current?.(), 0)
@@ -543,22 +556,31 @@ export function BoardClient() {
       setError(null)
 
       try {
-        const response = await fetch('/api/boards', {
+        const preferredBoardId = window.localStorage.getItem('moodboard-current-board-id')
+        const requestBoard = (boardId?: string | null) => fetch(boardId ? `/api/boards?id=${encodeURIComponent(boardId)}` : '/api/boards', {
           headers: {
             authorization: `Bearer ${nextSession.access_token}`,
           },
         })
-        const result = (await response.json()) as { board?: StoredBoard; error?: string }
+        let response = await requestBoard(preferredBoardId)
+        if (response.status === 404 && preferredBoardId) {
+          window.localStorage.removeItem('moodboard-current-board-id')
+          response = await requestBoard()
+        }
+        const result = (await response.json()) as { board?: StoredBoard; boards?: BoardSummary[]; error?: string }
         if (!response.ok || !result.board) {
           throw new Error(result.error ?? 'Could not load board.')
         }
 
         applyStoredBoard(result.board)
+        setBoards(result.boards?.length ? result.boards : [summarizeBoard(result.board)])
         setSaveState('saved')
+        return true
       } catch (caught) {
         const message = caught instanceof Error ? caught.message : 'Could not load board.'
         setError(message)
         setSaveState('error')
+        return false
       }
     },
     [applyStoredBoard]
@@ -587,7 +609,11 @@ export function BoardClient() {
   const loadAuthenticatedState = useCallback(
     (nextSession: Session) => {
       void loadQuota(nextSession)
-      void loadBoard(nextSession)
+      if (boardLoadUserRef.current === nextSession.user.id) return
+      boardLoadUserRef.current = nextSession.user.id
+      void loadBoard(nextSession).then((loaded) => {
+        if (!loaded) boardLoadUserRef.current = null
+      })
     },
     [loadBoard, loadQuota]
   )
@@ -648,7 +674,7 @@ export function BoardClient() {
       hydratedBoardIdRef.current !== currentBoard.id ||
       !editor ||
       suppressSaveRef.current
-    ) return
+    ) return false
 
     setSaveState('saving')
 
@@ -660,6 +686,7 @@ export function BoardClient() {
           authorization: `Bearer ${currentSession.access_token}`,
         },
         body: JSON.stringify({
+          title: briefRef.current.trim() || 'Untitled board',
           brief: briefRef.current,
           document: {
             version: 2,
@@ -675,13 +702,24 @@ export function BoardClient() {
         throw new Error(result.error ?? 'Could not autosave board.')
       }
 
-      boardRef.current = result.board
-      setBoardRecord(result.board)
-      setSaveState('saved')
+      if (boardRef.current?.id === currentBoard.id) {
+        boardRef.current = result.board
+        setBoardRecord(result.board)
+        setBoards((current) => {
+          const summary = summarizeBoard(result.board as StoredBoard)
+          const next = current.some((board) => board.id === summary.id)
+            ? current.map((board) => (board.id === summary.id ? summary : board))
+            : [summary, ...current]
+          return next.sort((a, b) => Date.parse(b.updated_at ?? '') - Date.parse(a.updated_at ?? ''))
+        })
+        setSaveState('saved')
+      }
+      return true
     } catch (caught) {
       const message = caught instanceof Error ? caught.message : 'Could not autosave board.'
       setError(message)
       setSaveState('error')
+      return false
     }
   }, [])
 
@@ -702,6 +740,86 @@ export function BoardClient() {
       void saveBoard()
     }, 900)
   }, [refreshCanvasStats, saveBoard])
+
+  const saveBoardNow = useCallback(async () => {
+    if (saveTimerRef.current) {
+      clearTimeout(saveTimerRef.current)
+      saveTimerRef.current = null
+    }
+    const saved = await saveBoard()
+    if (saved) setBoardMenuOpen(false)
+    return saved
+  }, [saveBoard])
+
+  const createNewBoard = useCallback(async () => {
+    const currentSession = sessionRef.current
+    if (!currentSession) {
+      setError('Sign in to create and save boards.')
+      return
+    }
+
+    if (!(await saveBoardNow())) return
+    setBoardAction('creating')
+    setError(null)
+    try {
+      const response = await fetch('/api/boards', {
+        method: 'POST',
+        headers: {
+          'Content-Type': 'application/json',
+          authorization: `Bearer ${currentSession.access_token}`,
+        },
+        body: JSON.stringify({ title: 'Untitled board' }),
+      })
+      const result = (await response.json().catch(() => null)) as { board?: StoredBoard; error?: string } | null
+      if (!response.ok || !result?.board) throw new Error(result?.error ?? 'Could not create board.')
+
+      setBoards((current) => [summarizeBoard(result.board as StoredBoard), ...current])
+      applyStoredBoard(result.board)
+      setSaveState('saved')
+      setBoardMenuOpen(false)
+    } catch (caught) {
+      setError(caught instanceof Error ? caught.message : 'Could not create board.')
+    } finally {
+      setBoardAction('idle')
+    }
+  }, [applyStoredBoard, saveBoardNow])
+
+  const openBoard = useCallback(async (boardId: string) => {
+    const currentSession = sessionRef.current
+    if (!currentSession) {
+      setError('Sign in to open saved boards.')
+      return
+    }
+    if (boardRef.current?.id === boardId) {
+      setBoardMenuOpen(false)
+      return
+    }
+
+    if (!(await saveBoardNow())) return
+    setBoardAction('opening')
+    setError(null)
+    try {
+      const response = await fetch(`/api/boards?id=${encodeURIComponent(boardId)}`, {
+        headers: { authorization: `Bearer ${currentSession.access_token}` },
+      })
+      const result = (await response.json().catch(() => null)) as {
+        board?: StoredBoard
+        boards?: BoardSummary[]
+        error?: string
+      } | null
+      if (!response.ok || !result?.board) throw new Error(result?.error ?? 'Could not open board.')
+
+      if (result.boards?.length) setBoards(result.boards)
+      applyStoredBoard(result.board)
+      setSaveState('saved')
+      setBoardMenuOpen(false)
+    } catch (caught) {
+      setError(caught instanceof Error ? caught.message : 'Could not open board.')
+      setSaveState('error')
+    } finally {
+      setBoardAction('idle')
+    }
+  }, [applyStoredBoard, saveBoardNow])
 
   const updateChatMessages = useCallback(
     (next: ChatMessage[] | ((current: ChatMessage[]) => ChatMessage[]), shouldSave = true) => {
@@ -876,6 +994,10 @@ export function BoardClient() {
   }
 
   const signOut = async () => {
+    if (sessionRef.current && !(await saveBoardNow())) {
+      setError('Could not save this board. Try again before signing out.')
+      return
+    }
     await supabase.auth.signOut()
     setShareMessage(null)
     if (typeof window !== 'undefined') {
@@ -1335,64 +1457,29 @@ export function BoardClient() {
     setExtractionState({ sourceId: source.id, action })
 
     try {
-      if (action === 'subject' || action === 'describe') {
-        const extractedImage = await extractSubjectClient(source.url)
-        let imageUrl = extractedImage
-        if (extractedImage.startsWith('data:image/')) {
-          const imageBlob = await (await fetch(extractedImage)).blob()
-          const formData = new FormData()
-          formData.append('file', new File([imageBlob], 'local-subject.png', { type: 'image/png' }))
-          const upload = await fetch('/api/import-image', { method: 'POST', body: formData })
-          const uploaded = (await upload.json().catch(() => null)) as { url?: string; error?: string } | null
-          if (!upload.ok || !uploaded?.url) {
-            throw new Error(uploaded?.error ?? 'Could not save the locally extracted image.')
-          }
-          imageUrl = uploaded.url
+      const extractedImage = await extractSubjectClient(source.url)
+      let imageUrl = extractedImage
+      if (extractedImage.startsWith('data:image/')) {
+        const imageBlob = await (await fetch(extractedImage)).blob()
+        const formData = new FormData()
+        formData.append('file', new File([imageBlob], 'local-subject.png', { type: 'image/png' }))
+        const upload = await fetch('/api/import-image', { method: 'POST', body: formData })
+        const uploaded = (await upload.json().catch(() => null)) as { url?: string; error?: string } | null
+        if (!upload.ok || !uploaded?.url) {
+          throw new Error(uploaded?.error ?? 'Could not save the locally extracted image.')
         }
-
-        const dimensions = await loadImageDimensions(imageUrl).catch(() => ({ width: 512, height: 512 }))
-        createElementAtPoint({
-          imageUrl,
-          label: action === 'describe' ? prompt ?? 'element' : cleanReferenceName(source.name, 'subject'),
-          sourceId: source.id,
-          width: dimensions.width,
-          height: dimensions.height,
-        })
-        captureClientEvent('extract', { mode: action, provider: 'local' }, sessionRef.current?.user.id)
-        return
+        imageUrl = uploaded.url
       }
 
-      const response = await fetch('/api/extract', {
-        method: 'POST',
-        headers: {
-          'Content-Type': 'application/json',
-          ...(sessionRef.current ? { authorization: `Bearer ${sessionRef.current.access_token}` } : {}),
-        },
-        body: JSON.stringify({
-          sourceUrl: source.url,
-          mode: action,
-          prompt: action === 'describe' ? prompt : undefined,
-        }),
-      })
-      const result = (await response.json()) as {
-        url?: string; width?: number; height?: number; error?: string; code?: string; creditsBalance?: number
-      }
-
-      if (!response.ok || !result.url) {
-        if (result.code === 'insufficient_credits') setCreditModalOpen(true)
-        throw new Error(result.error ?? 'Extraction failed.')
-      }
-
-      updateQuotaFromPayload(result)
-
+      const dimensions = await loadImageDimensions(imageUrl).catch(() => ({ width: 512, height: 512 }))
       createElementAtPoint({
-        imageUrl: result.url,
+        imageUrl,
         label: action === 'describe' ? prompt ?? 'element' : cleanReferenceName(source.name, 'subject'),
         sourceId: source.id,
-        width: result.width,
-        height: result.height,
+        width: dimensions.width,
+        height: dimensions.height,
       })
-      captureClientEvent('extract', { mode: action }, sessionRef.current?.user.id)
+      captureClientEvent('extract', { mode: action, provider: 'local' }, sessionRef.current?.user.id)
     } catch (caught) {
       const message = caught instanceof Error ? caught.message : 'Extraction failed.'
       setError(message)
@@ -1432,23 +1519,36 @@ export function BoardClient() {
   }
 
   const pasteClipboardImage = async () => {
+    setError(null)
     try {
-      setError(null)
-      const items = await navigator.clipboard.read()
-      for (const item of items) {
-        const imageType = item.types.find((type) => type.startsWith('image/'))
-        if (imageType) {
-          const blob = await item.getType(imageType)
-          await importImage({
-            file: new File([blob], `clipboard.${imageType.split('/')[1]}`, { type: imageType }),
-          })
-          return
+      if (navigator.clipboard.read) {
+        const items = await navigator.clipboard.read()
+        for (const item of items) {
+          const imageType = item.types.find((type) => type.startsWith('image/'))
+          if (imageType) {
+            const blob = await item.getType(imageType)
+            await importImage({
+              file: new File([blob], `clipboard.${imageType.split('/')[1]}`, { type: imageType }),
+            })
+            return
+          }
         }
       }
-      setError('Clipboard does not contain an image.')
     } catch {
-      setError('Clipboard image access was blocked.')
+      // Some browsers allow clipboard text while blocking the richer read API.
     }
+
+    try {
+      const clipboardText = (await navigator.clipboard.readText()).trim()
+      if (/^https?:\/\//i.test(clipboardText)) {
+        await importImage({ url: clipboardText })
+        return
+      }
+    } catch {
+      // The actionable message below covers unsupported or denied clipboard access.
+    }
+
+    setError('Clipboard access was blocked, or it does not contain an image or image URL.')
   }
 
   const generate = async () => {
@@ -1943,18 +2043,85 @@ export function BoardClient() {
             </div>
           </div>
 
-          <div className="hidden md:flex items-center gap-1 rounded-full border border-slate-200 bg-slate-100 px-2.5 py-1 text-[11px] font-mono font-semibold text-slate-700">
-            <span>Page 1</span>
-            <span className="text-[9px] text-slate-400">▾</span>
+          <div className="relative hidden md:block">
+            <button
+              type="button"
+              onClick={() => setBoardMenuOpen((open) => !open)}
+              disabled={!session || boardAction !== 'idle'}
+              className="flex max-w-40 items-center gap-1 rounded-full border border-slate-200 bg-slate-100 px-2.5 py-1 text-[11px] font-mono font-semibold text-slate-700 transition hover:bg-slate-200 disabled:cursor-not-allowed disabled:opacity-50"
+              aria-expanded={boardMenuOpen}
+              aria-haspopup="menu"
+              title={session ? 'Open or create a board' : 'Sign in to save boards'}
+            >
+              <span className="truncate">{boardAction === 'creating' ? 'Creating…' : boardAction === 'opening' ? 'Opening…' : 'Boards'}</span>
+              <span className="text-[9px] text-slate-400">{boardMenuOpen ? '▴' : '▾'}</span>
+            </button>
+
+            {boardMenuOpen ? (
+              <div
+                role="menu"
+                className="absolute left-0 top-full z-[80] mt-2 w-72 overflow-hidden rounded-2xl border border-slate-200 bg-white p-2 shadow-2xl"
+              >
+                <div className="flex items-center justify-between px-2 py-1.5">
+                  <span className="font-mono text-[9px] font-bold uppercase tracking-widest text-slate-500">Your boards</span>
+                  <button
+                    type="button"
+                    onClick={() => void createNewBoard()}
+                    className="rounded-full bg-[#0F0C59] px-3 py-1 text-[10px] font-bold text-white transition hover:bg-blue-900"
+                  >
+                    + New board
+                  </button>
+                </div>
+                <div className="max-h-64 space-y-1 overflow-y-auto py-1">
+                  {boards.map((board) => {
+                    const active = board.id === boardRecord?.id
+                    return (
+                      <button
+                        key={board.id}
+                        type="button"
+                        role="menuitem"
+                        onClick={() => void openBoard(board.id)}
+                        className={`flex w-full items-center justify-between gap-3 rounded-xl px-3 py-2 text-left transition ${
+                          active ? 'bg-[#0F0C59] text-white' : 'text-slate-700 hover:bg-slate-100'
+                        }`}
+                      >
+                        <span className="min-w-0">
+                          <span className="block truncate text-xs font-bold">{boardDisplayName(board)}</span>
+                          <span className={`block font-mono text-[9px] ${active ? 'text-white/60' : 'text-slate-400'}`}>
+                            {board.updated_at ? new Date(board.updated_at).toLocaleDateString() : 'Saved board'}
+                          </span>
+                        </span>
+                        {active ? <span className="text-xs" aria-label="Current board">✓</span> : null}
+                      </button>
+                    )
+                  })}
+                </div>
+                <button
+                  type="button"
+                  onClick={() => void saveBoardNow()}
+                  className="mt-1 w-full rounded-xl border border-slate-200 bg-slate-50 px-3 py-2 text-[10px] font-mono font-bold uppercase tracking-wider text-slate-700 transition hover:bg-slate-100"
+                >
+                  Save current board now
+                </button>
+              </div>
+            ) : null}
           </div>
 
           {/* Live Status Pill */}
-          <div className="flex items-center gap-1.5 rounded-full border border-slate-200 bg-slate-100 px-2.5 py-1 text-[10px] font-mono font-bold tracking-wider uppercase text-slate-700">
+          <button
+            type="button"
+            onClick={() => void saveBoardNow()}
+            disabled={!session || saveState === 'saving'}
+            className="flex items-center gap-1.5 rounded-full border border-slate-200 bg-slate-100 px-2.5 py-1 text-[10px] font-mono font-bold tracking-wider uppercase text-slate-700 transition hover:bg-slate-200 disabled:cursor-default"
+            title={session ? 'Save board now' : 'Sign in to save boards'}
+          >
             <span className={`h-2 w-2 rounded-full ${
-              generationState === 'generating' || composingState === 'composing'
+              generationState === 'generating' || composingState === 'composing' || extractionState
                 ? 'bg-[#D95D24] animate-ping'
                 : importState === 'importing' || saveState === 'saving'
                 ? 'bg-amber-500 animate-pulse'
+                : saveState === 'error'
+                ? 'bg-red-500'
                 : 'bg-emerald-500'
             }`} />
             <span>
@@ -1964,11 +2131,19 @@ export function BoardClient() {
                 ? 'COMPOSING'
                 : importState === 'importing'
                 ? 'IMPORTING'
+                : extractionState
+                ? 'EXTRACTING'
                 : saveState === 'saving'
                 ? 'SAVING'
+                : saveState === 'loading'
+                ? 'LOADING'
+                : saveState === 'error'
+                ? 'SAVE ERROR'
+                : saveState === 'saved'
+                ? 'SAVED'
                 : 'IDLE'}
             </span>
-          </div>
+          </button>
         </div>
 
         {/* Center: The Circular Tool Dock (7 circular 40px buttons) */}
@@ -2809,6 +2984,7 @@ export function BoardClient() {
                   return () => {
                     disposed = true
                     unlisten()
+                    if (editorRef.current === editor) editorRef.current = null
                   }
                 }}
               />

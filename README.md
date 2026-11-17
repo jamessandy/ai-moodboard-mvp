@@ -154,7 +154,7 @@ Round 3 acceptance:
 - Swatch colors are injected directly into the assembled prompt.
 - Element cutout URLs are sent as generation references.
 - Users must sign up or log in before reaching the board. Email/password, Google OAuth, and magic links are supported.
-- Logged-in users get one persisted board that autosaves the serialized tldraw document and brief.
+- Logged-in users can create, open, and switch between persisted boards. The active board autosaves its serialized tldraw document and brief.
 - Each user gets 10 free generated images. The remaining quota is shown in the UI and enforced in `/api/generate`.
 - The floating Chat widget turns conversational instructions into generation prompts, streams generated images into the thread, and can add any chat image back to the board.
 - Comment mode drops persisted `comment-pin` shapes on the canvas with replies, resolve controls, and a resolved-comment filter.
@@ -225,7 +225,8 @@ The Comment toolbar toggle enables click-to-drop canvas comments. Each comment i
 
 The browser uses `NEXT_PUBLIC_SUPABASE_ANON_KEY` only for Supabase Auth. Board persistence goes through authenticated app routes:
 
-- `GET /api/boards` loads or creates the current user's board.
+- `GET /api/boards` lists the current user's boards and loads the requested (or active) board.
+- `POST /api/boards` creates a new board.
 - `PATCH /api/boards/[id]` autosaves `{ brief, document }`.
 - `GET /api/public-board/[shareId]` reads a public shared board.
 - `/b/[shareId]` renders the share page read-only.

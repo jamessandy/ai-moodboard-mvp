@@ -17,9 +17,11 @@ export async function PATCH(request: NextRequest, context: { params: Promise<{ i
   }
 
   const supabase = createServiceSupabaseClient()
+  const title = typeof body.title === 'string' ? body.title.trim().slice(0, 120) : undefined
   const { data, error } = await supabase
     .from('boards')
     .update({
+      ...(title ? { title } : {}),
       brief: body.brief ?? '',
       document: body.document,
       updated_at: new Date().toISOString(),
