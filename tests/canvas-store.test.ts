@@ -7,11 +7,12 @@ test('keeps camera session changes out of the document autosave listener', () =>
   const listeners: Array<{
     listener: () => void
     scope: 'document' | 'session'
+    source?: string
     removed: boolean
   }> = []
   const store = {
-    listen(listener: () => void, filters: { scope: 'document' | 'session' }) {
-      const registration = { listener, scope: filters.scope, removed: false }
+    listen(listener: () => void, filters: { scope: 'document' | 'session'; source?: string }) {
+      const registration = { listener, scope: filters.scope, source: filters.source, removed: false }
       listeners.push(registration)
       return () => {
         registration.removed = true
@@ -27,6 +28,7 @@ test('keeps camera session changes out of the document autosave listener', () =>
   })
 
   assert.deepEqual(listeners.map(({ scope }) => scope), ['document', 'session'])
+  assert.equal(listeners.find(({ scope }) => scope === 'document')?.source, 'user')
 
   listeners.find(({ scope }) => scope === 'session')?.listener()
   assert.equal(documentChanges, 0)

@@ -100,10 +100,11 @@ function rectPath(w: number, h: number) {
 }
 
 function ToggleChips({ editor, shape }: { editor: Editor; shape: ImageRefShape | ElementShape }) {
+  const currentTags = Array.isArray(shape.props?.tags) ? shape.props.tags : []
   const toggleTag = (tag: Tag) => {
-    const nextTags = shape.props.tags.includes(tag)
-      ? shape.props.tags.filter((item) => item !== tag)
-      : [...shape.props.tags, tag]
+    const nextTags = currentTags.includes(tag)
+      ? currentTags.filter((item) => item !== tag)
+      : [...currentTags, tag]
 
     editor.updateShape({
       id: shape.id,
@@ -118,7 +119,7 @@ function ToggleChips({ editor, shape }: { editor: Editor; shape: ImageRefShape |
       onPointerDown={(event) => event.stopPropagation()}
     >
       {TAGS.map((tag) => {
-        const active = shape.props.tags.includes(tag)
+        const active = currentTags.includes(tag)
         return (
           <button
             key={tag}
@@ -139,7 +140,7 @@ function ToggleChips({ editor, shape }: { editor: Editor; shape: ImageRefShape |
 function EditableElementLabel({ editor, shape }: { editor: Editor; shape: ElementShape }) {
   return (
     <input
-      value={shape.props.label}
+      value={shape.props?.label ?? ''}
       className="absolute left-2 top-2 max-w-[calc(100%-16px)] rounded bg-white/90 px-2 py-1 text-xs font-semibold text-neutral-900 shadow"
       onPointerDown={(event) => event.stopPropagation()}
       onChange={(event) => {
@@ -187,6 +188,8 @@ export class ImageRefShapeUtil extends ShapeUtil<ImageRefShape> {
   getDefaultProps(): ImageRefShape['props'] {
     return { url: '', label: 'reference', tags: [], w: 280, h: 220 }
   }
+
+  override canCull = () => false
 
   override canResize() {
     return true
@@ -243,6 +246,8 @@ export class ElementShapeUtil extends ShapeUtil<ElementShape> {
     return { url: '', label: 'element', sourceId: '', tags: [], w: 320, h: 320 }
   }
 
+  override canCull = () => false
+
   override canResize() {
     return true
   }
@@ -293,6 +298,8 @@ export class SwatchShapeUtil extends ShapeUtil<SwatchShape> {
     return { colors: ['#1f2937', '#ef4444', '#f8fafc'], w: 220, h: 92 }
   }
 
+  override canCull = () => false
+
   override canResize() {
     return true
   }
@@ -306,10 +313,11 @@ export class SwatchShapeUtil extends ShapeUtil<SwatchShape> {
   }
 
   component(shape: SwatchShape) {
+    const colors = Array.isArray(shape.props?.colors) ? shape.props.colors : []
     return (
       <HTMLContainer className="overflow-hidden rounded border border-neutral-950/15 bg-white shadow-sm">
         <div className="flex h-full w-full">
-          {shape.props.colors.map((color, index) => (
+          {colors.map((color, index) => (
             <div key={`${color}-${index}`} className="relative flex-1" style={{ background: color }}>
               <span className="absolute bottom-1 left-1 rounded bg-white/80 px-1 font-mono text-[10px] text-neutral-900">
                 {color}
@@ -337,6 +345,8 @@ export class TypeSampleShapeUtil extends ShapeUtil<TypeSampleShape> {
   getDefaultProps(): TypeSampleShape['props'] {
     return { label: 'Condensed grotesk / wide tracking', w: 320, h: 96 }
   }
+
+  override canCull = () => false
 
   override canResize() {
     return true
@@ -376,6 +386,8 @@ export class NoteShapeUtil extends ShapeUtil<NoteShape> {
   getDefaultProps(): NoteShape['props'] {
     return { text: 'sun-bleached, intimate, tactile', w: 240, h: 150 }
   }
+
+  override canCull = () => false
 
   override canResize() {
     return true
@@ -429,6 +441,8 @@ export class CommentPinShapeUtil extends ShapeUtil<CommentPinShape> {
       createdAt: new Date().toISOString(),
     }
   }
+
+  override canCull = () => false
 
   override canResize() {
     return false

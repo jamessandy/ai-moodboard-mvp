@@ -8,6 +8,20 @@ type BoundsLike = {
 }
 
 export function boundsOverlap(first: BoundsLike, second: BoundsLike) {
+  if (
+    !first ||
+    !second ||
+    !Number.isFinite(first.minX) ||
+    !Number.isFinite(first.maxX) ||
+    !Number.isFinite(first.minY) ||
+    !Number.isFinite(first.maxY) ||
+    !Number.isFinite(second.minX) ||
+    !Number.isFinite(second.maxX) ||
+    !Number.isFinite(second.minY) ||
+    !Number.isFinite(second.maxY)
+  ) {
+    return true
+  }
   return !(
     first.maxX < second.minX ||
     first.minX > second.maxX ||
@@ -19,7 +33,9 @@ export function boundsOverlap(first: BoundsLike, second: BoundsLike) {
 export function canvasContentIsVisible(editor: Editor) {
   const content = editor.getCurrentPageBounds()
   if (!content) return true
-  return boundsOverlap(content, editor.getViewportPageBounds())
+  const viewport = editor.getViewportPageBounds()
+  if (!viewport) return true
+  return boundsOverlap(content, viewport)
 }
 
 export function focusCanvasContent(editor: Editor, duration = 0) {
@@ -30,6 +46,13 @@ export function focusCanvasContent(editor: Editor, duration = 0) {
   editor.updateViewportScreenBounds(container)
   const bounds = editor.getCurrentPageBounds()
   if (!bounds) {
+    editor.resetZoom(editor.getViewportScreenCenter(), { force: true, immediate: duration === 0 })
+    return true
+  }
+
+  const w = 'w' in bounds && typeof (bounds as { w: number }).w === 'number' ? (bounds as { w: number }).w : bounds.maxX - bounds.minX
+  const h = 'h' in bounds && typeof (bounds as { h: number }).h === 'number' ? (bounds as { h: number }).h : bounds.maxY - bounds.minY
+  if (w <= 0 || h <= 0) {
     editor.resetZoom(editor.getViewportScreenCenter(), { force: true, immediate: duration === 0 })
     return true
   }

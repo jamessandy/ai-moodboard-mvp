@@ -6,7 +6,7 @@ type CanvasChangeHandlers = {
 }
 
 export function listenToCanvasChanges(store: TLStore, handlers: CanvasChangeHandlers) {
-  const unlistenDocument = store.listen(handlers.onDocumentChange, { scope: 'document' })
+  const unlistenDocument = store.listen(handlers.onDocumentChange, { scope: 'document', source: 'user' })
   const unlistenSession = store.listen(handlers.onSessionChange, { scope: 'session' })
 
   return () => {

@@ -31,6 +31,7 @@ import {
   cleanHexColors,
   cleanSourceRole,
   cleanTags,
+  countSnapshotShapes,
   isMoodboardDocument,
   selectBoardSnapshot,
 } from '@/lib/board'
@@ -348,7 +349,12 @@ export function BoardClient() {
     }
     setError(null)
   }
-  const [quota, setQuota] = useState<UsageQuota | null>(null)
+  const [quota, setQuotaState] = useState<UsageQuota | null>(null)
+  const quotaRef = useRef<UsageQuota | null>(null)
+  const setQuota = useCallback((nextQuota: UsageQuota | null) => {
+    quotaRef.current = nextQuota
+    setQuotaState(nextQuota)
+  }, [])
   const [creditModalOpen, setCreditModalOpen] = useState(false)
   const [checkoutLoading, setCheckoutLoading] = useState<string | null>(null)
   const [boardRecord, setBoardRecord] = useState<StoredBoard | null>(null)
@@ -375,7 +381,14 @@ export function BoardClient() {
   const [composePosition, setComposePosition] = useState<ComposePosition>('center')
   const [composeOutline, setComposeOutline] = useState(true)
   const [composeOutlineColor, setComposeOutlineColor] = useState('#111827')
-  const [error, setError] = useState<string | null>(null)
+  const [error, setErrorState] = useState<string | null>(null)
+  const setError = useCallback((message: string | null) => {
+    if (message === 'Failed to fetch' || message === 'Load failed') {
+      console.warn('Suppressed raw network error toast:', message)
+      return
+    }
+    setErrorState(message)
+  }, [])
   const [generationModel, setGenerationModel] = useState<string>('hf-spaces/black-forest-labs/FLUX.2-dev')
   const generationModelRef = useRef(generationModel)
 
@@ -548,7 +561,9 @@ export function BoardClient() {
     setOutputs([])
     setSelectedOutputSlot(null)
 
-    if (editor && previousBoardId === board.id && validSnapshot && !preserveCurrent) {
+    const currentShapes = editor?.getCurrentPageShapes() ?? []
+    const hasLiveContent = currentShapes.length > 0
+    if (editor && previousBoardId === board.id && validSnapshot && !preserveCurrent && !hasLiveContent) {
       try {
         suppressSaveRef.current = true
         editor.loadSnapshot(validSnapshot)
@@ -558,12 +573,6 @@ export function BoardClient() {
           suppressSaveRef.current = false
           refreshCanvasStats()
         }, 80)
-        window.setTimeout(() => {
-          if (editorRef.current === editor && !canvasContentIsVisible(editor)) {
-            focusCanvasContent(editor)
-            refreshCanvasStats()
-          }
-        }, 500)
       } catch (e) {
         console.warn('Failed to apply board snapshot to existing editor', e)
         suppressSaveRef.current = false
@@ -621,22 +630,26 @@ export function BoardClient() {
           authorization: `Bearer ${nextSession.access_token}`,
         },
       })
+      if (!response.ok) {
+        console.warn('Could not load credit balance, status:', response.status)
+        return
+      }
       const result = (await response.json()) as Partial<UsageQuota> & { error?: string }
 
-      if (!response.ok || typeof result.creditsBalance !== 'number') {
-        throw new Error(result.error ?? 'Could not load credit balance.')
+      if (typeof result.creditsBalance === 'number') {
+        setQuota({ creditsBalance: result.creditsBalance })
       }
-
-      setQuota({ creditsBalance: result.creditsBalance })
     } catch (caught) {
-      const message = caught instanceof Error ? caught.message : 'Could not load credit balance.'
-      setError(message)
+      // Background profile/quota fetch failures should never trigger fatal user-facing toasts
+      console.warn('Failed to load credit balance:', caught)
     }
-  }, [])
+  }, [setQuota])
 
   const loadAuthenticatedState = useCallback(
     (nextSession: Session) => {
-      void loadQuota(nextSession)
+      if (quotaRef.current === null) {
+        void loadQuota(nextSession)
+      }
       if (boardLoadUserRef.current === nextSession.user.id) return
       boardLoadUserRef.current = nextSession.user.id
       void loadBoard(nextSession).then((loaded) => {
@@ -703,6 +716,14 @@ export function BoardClient() {
       !editor ||
       suppressSaveRef.current
     ) return false
+
+    const pageShapes = editor.getCurrentPageShapes()
+    const storedSnapshot = getStoredTldrawSnapshot(currentBoard.document)
+    const previousShapesCount = countSnapshotShapes(storedSnapshot)
+    if (pageShapes.length === 0 && previousShapesCount > 0) {
+      console.warn('Skipping autosave: editor has 0 shapes while existing board has', previousShapesCount)
+      return false
+    }
 
     setSaveState('saving')
 
@@ -772,9 +793,9 @@ export function BoardClient() {
     editorRef.current = editor
     const mountedBoardId = boardRecord?.id ?? null
     let disposed = false
-    let recoveryActive = Boolean(tldrawSnapshot)
-    let recoveryFrame: number | null = null
-    const recoveryTimers: number[] = []
+    let fitAttempts = 0
+    let fitTimer: number | null = null
+
     const markBoardHydrated = () => {
       suppressSaveRef.current = false
       if (mountedBoardId && boardRef.current?.id === mountedBoardId) {
@@ -786,33 +807,16 @@ export function BoardClient() {
       }
     }
 
-    const fitCanvasContent = (attempts = 0) => {
+    const fitCanvasContent = () => {
       if (disposed) return
-      if (!focusCanvasContent(editor) && attempts < 12) {
-        window.setTimeout(() => fitCanvasContent(attempts + 1), 50)
+      const focused = focusCanvasContent(editor)
+      if (!focused && fitAttempts < 12) {
+        fitAttempts++
+        fitTimer = window.setTimeout(fitCanvasContent, 60)
         return
       }
       markBoardHydrated()
       refreshCanvasStats()
-    }
-
-    const recoverCanvasIfNeeded = () => {
-      if (
-        disposed ||
-        !recoveryActive ||
-        editor.getCurrentPageShapes().length === 0 ||
-        canvasContentIsVisible(editor)
-      ) return
-      focusCanvasContent(editor)
-      refreshCanvasStats()
-    }
-
-    const queueCanvasRecovery = () => {
-      if (recoveryFrame !== null || disposed || !recoveryActive) return
-      recoveryFrame = window.requestAnimationFrame(() => {
-        recoveryFrame = null
-        recoverCanvasIfNeeded()
-      })
     }
 
     if (tldrawSnapshot) {
@@ -820,12 +824,6 @@ export function BoardClient() {
       window.requestAnimationFrame(() => {
         fitCanvasContent()
       })
-      for (const delay of [120, 450, 1_100, 2_200]) {
-        recoveryTimers.push(window.setTimeout(recoverCanvasIfNeeded, delay))
-      }
-      recoveryTimers.push(window.setTimeout(() => {
-        recoveryActive = false
-      }, 4_000))
     } else {
       markBoardHydrated()
       refreshCanvasStats()
@@ -834,7 +832,6 @@ export function BoardClient() {
     const unlisten = listenToCanvasChanges(editor.store, {
       onDocumentChange: scheduleSave,
       onSessionChange: () => {
-        queueCanvasRecovery()
         const zoom = Math.round(editor.getZoomLevel() * 100)
         setZoomLevelPercent((prev) => (prev !== zoom ? zoom : prev))
       },
@@ -843,8 +840,7 @@ export function BoardClient() {
     return () => {
       disposed = true
       unlisten()
-      if (recoveryFrame !== null) window.cancelAnimationFrame(recoveryFrame)
-      for (const timer of recoveryTimers) window.clearTimeout(timer)
+      if (fitTimer !== null) window.clearTimeout(fitTimer)
       if (editorRef.current === editor) editorRef.current = null
     }
   }, [boardRecord?.id, refreshCanvasStats, saveBoard, scheduleSave, tldrawSnapshot])

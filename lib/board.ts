@@ -131,7 +131,7 @@ export function isMoodboardDocument(document: unknown): document is MoodboardDoc
   )
 }
 
-function countSnapshotShapes(snapshot: unknown) {
+export function countSnapshotShapes(snapshot: unknown) {
   if (!snapshot || typeof snapshot !== 'object' || !('store' in snapshot)) return 0
   const store = (snapshot as { store?: unknown }).store
   if (!store || typeof store !== 'object' || Array.isArray(store)) return 0
@@ -169,9 +169,13 @@ function hasCompleteImageAssets(snapshot: unknown) {
 
   return records.every((record) => {
     if (!record || typeof record !== 'object' || !('typeName' in record) || record.typeName !== 'shape') return true
-    const shape = record as { type?: unknown; props?: { assetId?: unknown } }
+    const shape = record as { type?: unknown; props?: { assetId?: unknown; url?: unknown } }
     if (shape.type === 'image' && typeof shape.props?.assetId !== 'string') return false
     if (!['image', 'image-ref', 'element'].includes(String(shape.type))) return true
+    if (shape.type === 'image-ref' || shape.type === 'element') {
+      const url = shape.props?.url
+      if (typeof url === 'string' && url.trim().length > 0) return true
+    }
     const assetId = shape.props?.assetId
     return typeof assetId === 'string' && typeof assets.get(assetId) === 'string' && assets.get(assetId) !== ''
   })
