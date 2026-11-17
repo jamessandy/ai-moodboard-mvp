@@ -8,6 +8,7 @@ import { SceneOrbitModal } from '@/components/SceneOrbitModal'
 import { ExplorePanel } from '@/components/ExplorePanel'
 import { AuthCard } from '@/components/AuthCard'
 import { captureClientEvent } from '@/lib/analytics/client'
+import { canvasContentIsVisible, focusCanvasContent } from '@/lib/canvas-camera'
 import {
   BoardDoc,
   ChatMessage,
@@ -442,13 +443,8 @@ export function BoardClient() {
   const handleZoomToFit = useCallback(() => {
     const editor = editorRef.current
     if (!editor) return
-    const shapes = editor.getCurrentPageShapes()
-    if (shapes.length > 0) {
-      editor.zoomToFit({ animation: { duration: 200 } })
-    } else {
-      editor.resetZoom(editor.getViewportScreenCenter(), { animation: { duration: 200 } })
-    }
-    refreshCanvasStats()
+    focusCanvasContent(editor, 200)
+    window.setTimeout(refreshCanvasStats, 220)
   }, [refreshCanvasStats])
 
   const isTldrawSnapshot = (document: unknown) =>
@@ -530,12 +526,16 @@ export function BoardClient() {
         editor.loadSnapshot(validSnapshot)
         window.setTimeout(() => {
           if (editorRef.current !== editor) return
-          if (editor.getCurrentPageShapes().length > 0) {
-            editor.zoomToFit({ animation: { duration: 0 } })
-          }
+          focusCanvasContent(editor)
           suppressSaveRef.current = false
           refreshCanvasStats()
         }, 80)
+        window.setTimeout(() => {
+          if (editorRef.current === editor && !canvasContentIsVisible(editor)) {
+            focusCanvasContent(editor)
+            refreshCanvasStats()
+          }
+        }, 500)
       } catch (e) {
         console.warn('Failed to apply board snapshot to existing editor', e)
         suppressSaveRef.current = false
@@ -2935,6 +2935,9 @@ export function BoardClient() {
                   editorRef.current = editor
                   const mountedBoardId = boardRecord?.id ?? null
                   let disposed = false
+                  let recoveryActive = Boolean(tldrawSnapshot)
+                  let recoveryFrame: number | null = null
+                  const recoveryTimers: number[] = []
                   const markBoardHydrated = () => {
                     suppressSaveRef.current = false
                     if (mountedBoardId && boardRef.current?.id === mountedBoardId) {
@@ -2948,21 +2951,31 @@ export function BoardClient() {
 
                   const fitCanvasContent = (attempts = 0) => {
                     if (disposed) return
-                    const container = editor.getContainer()
-                    const rect = container?.getBoundingClientRect()
-                    if ((!rect || rect.width < 100 || rect.height < 100) && attempts < 12) {
+                    if (!focusCanvasContent(editor) && attempts < 12) {
                       window.setTimeout(() => fitCanvasContent(attempts + 1), 50)
                       return
                     }
-
-                    const shapes = editor.getCurrentPageShapes()
-                    if (shapes.length > 0) {
-                      editor.zoomToFit({ animation: { duration: 0 } })
-                    } else {
-                      editor.resetZoom(editor.getViewportScreenCenter(), { animation: { duration: 0 } })
-                    }
                     markBoardHydrated()
                     refreshCanvasStats()
+                  }
+
+                  const recoverCanvasIfNeeded = () => {
+                    if (
+                      disposed ||
+                      !recoveryActive ||
+                      editor.getCurrentPageShapes().length === 0 ||
+                      canvasContentIsVisible(editor)
+                    ) return
+                    focusCanvasContent(editor)
+                    refreshCanvasStats()
+                  }
+
+                  const queueCanvasRecovery = () => {
+                    if (recoveryFrame !== null || disposed || !recoveryActive) return
+                    recoveryFrame = window.requestAnimationFrame(() => {
+                      recoveryFrame = null
+                      recoverCanvasIfNeeded()
+                    })
                   }
 
                   if (tldrawSnapshot) {
@@ -2970,12 +2983,19 @@ export function BoardClient() {
                     window.requestAnimationFrame(() => {
                       fitCanvasContent()
                     })
+                    for (const delay of [120, 450, 1_100, 2_200]) {
+                      recoveryTimers.push(window.setTimeout(recoverCanvasIfNeeded, delay))
+                    }
+                    recoveryTimers.push(window.setTimeout(() => {
+                      recoveryActive = false
+                    }, 4_000))
                   } else {
                     markBoardHydrated()
                     refreshCanvasStats()
                   }
 
                   const unlisten = editor.store.listen(() => {
+                    queueCanvasRecovery()
                     scheduleSave()
                     const zoom = Math.round(editor.getZoomLevel() * 100)
                     setZoomLevelPercent((prev) => (prev !== zoom ? zoom : prev))
@@ -2984,6 +3004,8 @@ export function BoardClient() {
                   return () => {
                     disposed = true
                     unlisten()
+                    if (recoveryFrame !== null) window.cancelAnimationFrame(recoveryFrame)
+                    for (const timer of recoveryTimers) window.clearTimeout(timer)
                     if (editorRef.current === editor) editorRef.current = null
                   }
                 }}
