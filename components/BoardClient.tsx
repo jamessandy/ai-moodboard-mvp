@@ -1,6 +1,6 @@
 'use client'
 
-import { ChangeEvent, useCallback, useEffect, useMemo, useRef, useState } from 'react'
+import { ChangeEvent, memo, useCallback, useEffect, useMemo, useRef, useState } from 'react'
 import { Session } from '@supabase/supabase-js'
 import {
   AssetRecordType,
@@ -9,6 +9,7 @@ import {
   TLEditorSnapshot,
   TLComponents,
   TLStoreSnapshot,
+  TldrawProps,
   createShapeId,
   createTLStore,
   defaultShapeUtils,
@@ -76,6 +77,17 @@ const DEFAULT_SWATCHES = [
   ['#264653', '#2a9d8f', '#e9c46a', '#f4a261'],
   ['#0f172a', '#e11d48', '#f1f5f9'],
 ]
+
+const MOODBOARD_TLDRAW_OPTIONS = {
+  // Keep the canvas mounted while tldraw fetches its CDN fonts in the background.
+  maxFontsToLoadBeforeRender: 0,
+}
+
+const StableMoodboardCanvas = memo(function StableMoodboardCanvas(
+  props: Omit<TldrawProps, 'options'>
+) {
+  return <Tldraw {...props} options={MOODBOARD_TLDRAW_OPTIONS} />
+})
 const COMPOSE_POSITIONS: Array<{ id: ComposePosition; label: string; x: number; y: number }> = [
   { id: 'top-left', label: 'TL', x: 0.22, y: 0.22 },
   { id: 'top', label: 'T', x: 0.5, y: 0.22 },
@@ -755,6 +767,87 @@ export function BoardClient() {
       void saveBoard()
     }, 900)
   }, [refreshCanvasStats, saveBoard])
+
+  const handleCanvasMount = useCallback((editor: Editor) => {
+    editorRef.current = editor
+    const mountedBoardId = boardRecord?.id ?? null
+    let disposed = false
+    let recoveryActive = Boolean(tldrawSnapshot)
+    let recoveryFrame: number | null = null
+    const recoveryTimers: number[] = []
+    const markBoardHydrated = () => {
+      suppressSaveRef.current = false
+      if (mountedBoardId && boardRef.current?.id === mountedBoardId) {
+        hydratedBoardIdRef.current = mountedBoardId
+        if (syncPreservedSnapshotBoardIdRef.current === mountedBoardId) {
+          syncPreservedSnapshotBoardIdRef.current = null
+          void saveBoard()
+        }
+      }
+    }
+
+    const fitCanvasContent = (attempts = 0) => {
+      if (disposed) return
+      if (!focusCanvasContent(editor) && attempts < 12) {
+        window.setTimeout(() => fitCanvasContent(attempts + 1), 50)
+        return
+      }
+      markBoardHydrated()
+      refreshCanvasStats()
+    }
+
+    const recoverCanvasIfNeeded = () => {
+      if (
+        disposed ||
+        !recoveryActive ||
+        editor.getCurrentPageShapes().length === 0 ||
+        canvasContentIsVisible(editor)
+      ) return
+      focusCanvasContent(editor)
+      refreshCanvasStats()
+    }
+
+    const queueCanvasRecovery = () => {
+      if (recoveryFrame !== null || disposed || !recoveryActive) return
+      recoveryFrame = window.requestAnimationFrame(() => {
+        recoveryFrame = null
+        recoverCanvasIfNeeded()
+      })
+    }
+
+    if (tldrawSnapshot) {
+      suppressSaveRef.current = true
+      window.requestAnimationFrame(() => {
+        fitCanvasContent()
+      })
+      for (const delay of [120, 450, 1_100, 2_200]) {
+        recoveryTimers.push(window.setTimeout(recoverCanvasIfNeeded, delay))
+      }
+      recoveryTimers.push(window.setTimeout(() => {
+        recoveryActive = false
+      }, 4_000))
+    } else {
+      markBoardHydrated()
+      refreshCanvasStats()
+    }
+
+    const unlisten = listenToCanvasChanges(editor.store, {
+      onDocumentChange: scheduleSave,
+      onSessionChange: () => {
+        queueCanvasRecovery()
+        const zoom = Math.round(editor.getZoomLevel() * 100)
+        setZoomLevelPercent((prev) => (prev !== zoom ? zoom : prev))
+      },
+    })
+    refreshCanvasStats()
+    return () => {
+      disposed = true
+      unlisten()
+      if (recoveryFrame !== null) window.cancelAnimationFrame(recoveryFrame)
+      for (const timer of recoveryTimers) window.clearTimeout(timer)
+      if (editorRef.current === editor) editorRef.current = null
+    }
+  }, [boardRecord?.id, refreshCanvasStats, saveBoard, scheduleSave, tldrawSnapshot])
 
   const saveBoardNow = useCallback(async () => {
     if (saveTimerRef.current) {
@@ -2940,92 +3033,13 @@ export function BoardClient() {
           {/* Main Tldraw Canvas Container */}
           <div className={`relative min-w-0 flex-1 h-full w-full ${canvasTheme === 'dark' ? 'canvas-dark' : 'canvas-light'}`}>
             <div className={`absolute inset-0 ${showResolvedComments ? '' : 'hide-resolved-comments'}`}>
-              <Tldraw
+              <StableMoodboardCanvas
                 key={boardRecord?.id ?? 'anonymous'}
                 licenseKey={tldrawLicenseKey}
                 components={tldrawComponents}
                 shapeUtils={shapeUtils}
                 store={canvasStore}
-                onMount={(editor) => {
-                  editorRef.current = editor
-                  const mountedBoardId = boardRecord?.id ?? null
-                  let disposed = false
-                  let recoveryActive = Boolean(tldrawSnapshot)
-                  let recoveryFrame: number | null = null
-                  const recoveryTimers: number[] = []
-                  const markBoardHydrated = () => {
-                    suppressSaveRef.current = false
-                    if (mountedBoardId && boardRef.current?.id === mountedBoardId) {
-                      hydratedBoardIdRef.current = mountedBoardId
-                      if (syncPreservedSnapshotBoardIdRef.current === mountedBoardId) {
-                        syncPreservedSnapshotBoardIdRef.current = null
-                        void saveBoard()
-                      }
-                    }
-                  }
-
-                  const fitCanvasContent = (attempts = 0) => {
-                    if (disposed) return
-                    if (!focusCanvasContent(editor) && attempts < 12) {
-                      window.setTimeout(() => fitCanvasContent(attempts + 1), 50)
-                      return
-                    }
-                    markBoardHydrated()
-                    refreshCanvasStats()
-                  }
-
-                  const recoverCanvasIfNeeded = () => {
-                    if (
-                      disposed ||
-                      !recoveryActive ||
-                      editor.getCurrentPageShapes().length === 0 ||
-                      canvasContentIsVisible(editor)
-                    ) return
-                    focusCanvasContent(editor)
-                    refreshCanvasStats()
-                  }
-
-                  const queueCanvasRecovery = () => {
-                    if (recoveryFrame !== null || disposed || !recoveryActive) return
-                    recoveryFrame = window.requestAnimationFrame(() => {
-                      recoveryFrame = null
-                      recoverCanvasIfNeeded()
-                    })
-                  }
-
-                  if (tldrawSnapshot) {
-                    suppressSaveRef.current = true
-                    window.requestAnimationFrame(() => {
-                      fitCanvasContent()
-                    })
-                    for (const delay of [120, 450, 1_100, 2_200]) {
-                      recoveryTimers.push(window.setTimeout(recoverCanvasIfNeeded, delay))
-                    }
-                    recoveryTimers.push(window.setTimeout(() => {
-                      recoveryActive = false
-                    }, 4_000))
-                  } else {
-                    markBoardHydrated()
-                    refreshCanvasStats()
-                  }
-
-                  const unlisten = listenToCanvasChanges(editor.store, {
-                    onDocumentChange: scheduleSave,
-                    onSessionChange: () => {
-                      queueCanvasRecovery()
-                      const zoom = Math.round(editor.getZoomLevel() * 100)
-                      setZoomLevelPercent((prev) => (prev !== zoom ? zoom : prev))
-                    },
-                  })
-                  refreshCanvasStats()
-                  return () => {
-                    disposed = true
-                    unlisten()
-                    if (recoveryFrame !== null) window.cancelAnimationFrame(recoveryFrame)
-                    for (const timer of recoveryTimers) window.clearTimeout(timer)
-                    if (editorRef.current === editor) editorRef.current = null
-                  }
-                }}
+                onMount={handleCanvasMount}
               />
               {commentMode ? (
                 <button
