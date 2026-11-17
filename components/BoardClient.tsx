@@ -2,13 +2,24 @@
 
 import { ChangeEvent, useCallback, useEffect, useMemo, useRef, useState } from 'react'
 import { Session } from '@supabase/supabase-js'
-import { AssetRecordType, Editor, Tldraw, TLEditorSnapshot, TLComponents, TLStoreSnapshot, createShapeId } from 'tldraw'
+import {
+  AssetRecordType,
+  Editor,
+  Tldraw,
+  TLEditorSnapshot,
+  TLComponents,
+  TLStoreSnapshot,
+  createShapeId,
+  createTLStore,
+  defaultShapeUtils,
+} from 'tldraw'
 import { moodboardShapeUtils } from '@/components/moodboardShapes'
 import { SceneOrbitModal } from '@/components/SceneOrbitModal'
 import { ExplorePanel } from '@/components/ExplorePanel'
 import { AuthCard } from '@/components/AuthCard'
 import { captureClientEvent } from '@/lib/analytics/client'
 import { canvasContentIsVisible, focusCanvasContent } from '@/lib/canvas-camera'
+import { listenToCanvasChanges } from '@/lib/canvas-store'
 import {
   BoardDoc,
   ChatMessage,
@@ -357,6 +368,7 @@ export function BoardClient() {
   const generationModelRef = useRef(generationModel)
 
   const shapeUtils = useMemo(() => moodboardShapeUtils, [])
+  const storeShapeUtils = useMemo(() => [...defaultShapeUtils, ...moodboardShapeUtils], [])
   const [isToolbarCollapsed, setIsToolbarCollapsed] = useState(false)
   const tldrawComponents = useMemo<TLComponents>(
     () => ({
@@ -462,6 +474,10 @@ export function BoardClient() {
     if (valid) initialSnapshotRef.current = valid
     return valid
   }, [boardRecord])
+  const canvasStore = useMemo(
+    () => createTLStore({ shapeUtils: storeShapeUtils, snapshot: tldrawSnapshot }),
+    [storeShapeUtils, tldrawSnapshot]
+  )
 
   const setSourceList = (nextSources: SourceImage[]) => {
     sourcesRef.current = nextSources
@@ -704,7 +720,6 @@ export function BoardClient() {
 
       if (boardRef.current?.id === currentBoard.id) {
         boardRef.current = result.board
-        setBoardRecord(result.board)
         setBoards((current) => {
           const summary = summarizeBoard(result.board as StoredBoard)
           const next = current.some((board) => board.id === summary.id)
@@ -2930,7 +2945,7 @@ export function BoardClient() {
                 licenseKey={tldrawLicenseKey}
                 components={tldrawComponents}
                 shapeUtils={shapeUtils}
-                snapshot={tldrawSnapshot}
+                store={canvasStore}
                 onMount={(editor) => {
                   editorRef.current = editor
                   const mountedBoardId = boardRecord?.id ?? null
@@ -2994,11 +3009,13 @@ export function BoardClient() {
                     refreshCanvasStats()
                   }
 
-                  const unlisten = editor.store.listen(() => {
-                    queueCanvasRecovery()
-                    scheduleSave()
-                    const zoom = Math.round(editor.getZoomLevel() * 100)
-                    setZoomLevelPercent((prev) => (prev !== zoom ? zoom : prev))
+                  const unlisten = listenToCanvasChanges(editor.store, {
+                    onDocumentChange: scheduleSave,
+                    onSessionChange: () => {
+                      queueCanvasRecovery()
+                      const zoom = Math.round(editor.getZoomLevel() * 100)
+                      setZoomLevelPercent((prev) => (prev !== zoom ? zoom : prev))
+                    },
                   })
                   refreshCanvasStats()
                   return () => {
