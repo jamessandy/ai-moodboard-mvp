@@ -213,10 +213,10 @@ The Comment toolbar toggle enables click-to-drop canvas comments. Each comment i
 
 ## Extraction routes
 
-- `POST /api/extract` accepts `{ sourceUrl, mode: "subject" | "describe", prompt? }`.
-- `subject` uses `fal-ai/birefnet` with a `fal-ai/imageutils/rembg` fallback.
-- `describe` uses `fal-ai/evf-sam`.
-- Returned cutouts are re-hosted to `moodboard-elements`.
+- `POST /api/extract` accepts `{ sourceUrl }`.
+- Subject extraction runs locally with `@imgly/background-removal-node`; it does not use an external API or credits.
+- `sharp` normalizes the input and trims transparent pixels around the extracted foreground.
+- Returned PNG cutouts are stored in `moodboard-elements`.
 - `POST /api/extract-palette` accepts `{ sourceUrl }` and returns hex colors for creating a swatch.
 
 ## Auth, Autosave, Sharing

@@ -1,5 +1,5 @@
 import { NextRequest } from 'next/server'
-import { extractForegroundGrabCut } from '@/lib/grabcut-server'
+import { extractForegroundLocally } from '@/lib/background-removal-server'
 import { ELEMENT_BUCKET, createServiceSupabaseClientWithBucket } from '@/lib/supabase/server'
 
 export const runtime = 'nodejs'
@@ -129,7 +129,7 @@ export async function POST(request: NextRequest) {
       return Response.json({ error: 'Image is larger than 12MB.' }, { status: 413 })
     }
 
-    const cutout = await extractForegroundGrabCut(source.buffer)
+    const cutout = await extractForegroundLocally(source.buffer)
     const url = await storeElement(cutout.buffer)
     return Response.json({ url, width: cutout.width, height: cutout.height })
   } catch (error) {

@@ -1,9 +1,9 @@
 import assert from 'node:assert/strict'
 import test from 'node:test'
 import sharp from 'sharp'
-import { extractForegroundGrabCut } from '@/lib/grabcut-server'
+import { extractForegroundLocally } from '@/lib/background-removal-server'
 
-test('server GrabCut extracts a bounded foreground cutout locally', async () => {
+test('local background removal returns a cropped transparent PNG', { timeout: 60_000 }, async () => {
   const width = 256
   const height = 256
   const pixels = Buffer.alloc(width * height * 4, 255)
@@ -17,8 +17,11 @@ test('server GrabCut extracts a bounded foreground cutout locally', async () => 
   }
   const source = await sharp(pixels, { raw: { width, height, channels: 4 } }).png().toBuffer()
 
-  const result = await extractForegroundGrabCut(source)
+  const result = await extractForegroundLocally(source)
+  const metadata = await sharp(result.buffer).metadata()
+
   assert.ok(result.width > 0 && result.width < width)
   assert.ok(result.height > 0 && result.height < height)
-  assert.equal((await sharp(result.buffer).metadata()).format, 'png')
+  assert.equal(metadata.format, 'png')
+  assert.equal(metadata.hasAlpha, true)
 })

@@ -1,11 +1,11 @@
 import type { NextConfig } from 'next'
 
 const nextConfig: NextConfig = {
-  serverExternalPackages: ['sharp', '@techstark/opencv-js'],
+  serverExternalPackages: ['sharp', '@imgly/background-removal-node', 'onnxruntime-node'],
   outputFileTracingIncludes: {
     '/api/extract': [
-      './node_modules/@techstark/opencv-js/package.json',
-      './node_modules/@techstark/opencv-js/dist/opencv.js',
+      './node_modules/@imgly/background-removal-node/dist/**/*',
+      './node_modules/onnxruntime-node/bin/**/*',
     ],
   },
 }
