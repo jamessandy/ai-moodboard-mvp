@@ -6,6 +6,6 @@
       "https://storage.example/fruit-market.jpg",
       "https://storage.example/pool-flatlay.jpg"
     ],
-    "model": "hf-spaces/black-forest-labs/FLUX.2-dev"
+    "model": "runpod/flux-2-klein"
   }
 }

@@ -6,6 +6,6 @@
       "https://storage.example/editorial-court.jpg",
       "https://storage.example/washed-denim.jpg"
     ],
-    "model": "hf-spaces/black-forest-labs/FLUX.2-dev"
+    "model": "runpod/flux-2-klein"
   }
 }

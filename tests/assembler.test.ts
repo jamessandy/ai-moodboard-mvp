@@ -105,7 +105,7 @@ test('extracts palette from color-palette source roles', async () => {
   assert.match(compiled.prompt, /Element 1 — summer palette: use as color palette reference\./)
 })
 
-test('caps reference images at ten and includes notes and type-sample instruction', async () => {
+test('caps visual references at the FLUX.2 Klein limit and includes notes and type direction', async () => {
   const compiled = await compileBoard({
     ...emptyBoard,
     elements: Array.from({ length: 12 }, (_, index) => ({
@@ -117,8 +117,34 @@ test('caps reference images at ten and includes notes and type-sample instructio
     notes: [{ text: 'humid night energy' }, { text: 'flash-lit but premium' }],
   })
 
-  assert.equal(compiled.image_urls.length, 10)
-  assert.equal(compiled.image_urls.at(-1), 'https://storage.example/ref-9.jpg')
+  assert.equal(compiled.image_urls.length, 4)
+  assert.equal(compiled.image_urls.at(-1), 'https://storage.example/ref-3.jpg')
   assert.match(compiled.prompt, /Mood and intent: humid night energy; flash-lit but premium\./)
   assert.match(compiled.prompt, /Set any typography in the style of Sharp condensed sans/)
+})
+
+test('prioritizes assigned identity, pose, and outfit sources and removes duplicate URLs', async () => {
+  const compiled = await compileBoard({
+    ...emptyBoard,
+    elements: [
+      { url: 'https://storage.example/unassigned.png', label: 'loose cutout', tags: ['subject'] },
+      { url: 'https://storage.example/pose.jpg', label: 'duplicate pose', tags: ['composition'] },
+    ],
+    imageRefs: [{ url: 'https://storage.example/mood.jpg', label: 'mood', tags: ['mood'] }],
+    sources: [
+      { url: 'https://storage.example/outfit.jpg', label: 'coat', role: 'outfit' },
+      { url: 'https://storage.example/pose.jpg', label: 'stance', role: 'pose' },
+      { url: 'https://storage.example/identity.jpg', label: 'person', role: 'identity' },
+    ],
+  })
+
+  assert.deepEqual(compiled.image_urls, [
+    'https://storage.example/identity.jpg',
+    'https://storage.example/pose.jpg',
+    'https://storage.example/outfit.jpg',
+    'https://storage.example/unassigned.png',
+  ])
+  assert.match(compiled.prompt, /Element 1 — person: use as identity or likeness reference\./)
+  assert.match(compiled.prompt, /Element 2 — stance: use as pose and body position reference\./)
+  assert.match(compiled.prompt, /Element 3 — coat: use as outfit and styling reference\./)
 })

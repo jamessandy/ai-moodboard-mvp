@@ -9,7 +9,7 @@ import {
   cleanHexColors,
 } from '@/lib/board'
 import { Tag } from '@/lib/tags'
-import { GENERATION_MODEL_ID } from '@/lib/generation'
+import { GENERATION_MODEL_ID, MAX_GENERATION_REFERENCES } from '@/lib/generation'
 
 export type PaletteExtractor = (url: string) => Promise<string[]>
 export type CompileMetadata = {
@@ -57,6 +57,28 @@ type ReferenceInput = {
   sourceRole?: SourceRole
 }
 
+const SOURCE_ROLE_PRIORITY: SourceRole[] = [
+  'identity',
+  'pose',
+  'outfit',
+  'hair',
+  'makeup',
+  'props',
+  'composition',
+  'background',
+  'lighting',
+  'color-palette',
+]
+
+function uniqueReferences(items: ReferenceInput[]) {
+  const seen = new Set<string>()
+  return items.filter((item) => {
+    if (!item.url || seen.has(item.url)) return false
+    seen.add(item.url)
+    return true
+  })
+}
+
 export async function compileBoard(
   board: BoardDoc,
   options: { extractPalette?: PaletteExtractor } = {}
@@ -87,14 +109,23 @@ export async function compileBoardWithMetadata(
     tags: [],
     sourceRole: source.role,
   }))
-  const elements = [...elementRefs, ...imageRefs, ...sourceRefs].filter((element) => element.url).slice(0, 10)
+  const roleSources = sourceRefs
+    .filter((source) => source.sourceRole)
+    .sort(
+      (a, b) =>
+        SOURCE_ROLE_PRIORITY.indexOf(a.sourceRole as SourceRole) -
+        SOURCE_ROLE_PRIORITY.indexOf(b.sourceRole as SourceRole)
+    )
+  const unassignedSources = sourceRefs.filter((source) => !source.sourceRole)
+  const allReferences = uniqueReferences([...roleSources, ...elementRefs, ...imageRefs, ...unassignedSources])
+  const elements = allReferences.slice(0, MAX_GENERATION_REFERENCES)
   const image_urls = elements.map((element) => element.url)
   const palette = cleanHexColors(board.swatches.flatMap((swatch) => swatch.colors))
   const hasCuratedPalette = palette.length > 0
   const extractPalette = options.extractPalette ?? extractPaletteFromImage
   let paletteSource: CompileMetadata['paletteSource'] = hasCuratedPalette ? 'swatch' : 'none'
 
-  for (const element of elements) {
+  for (const element of allReferences) {
     if ((element.tags.includes('color') || element.sourceRole === 'color-palette') && !hasCuratedPalette) {
       palette.push(...(await extractPalette(element.url)))
     }

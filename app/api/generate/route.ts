@@ -12,7 +12,7 @@ import {
 import { IMAGES_PER_GENERATION } from '@/lib/usage'
 import { quoteFalAction } from '@/lib/credits/pricing'
 import { refundCredits, reserveCredits } from '@/lib/credits/wallet'
-import { GENERATION_MODEL_ID } from '@/lib/generation'
+import { GENERATION_MODEL_ID, MAX_GENERATION_REFERENCES } from '@/lib/generation'
 
 export const runtime = 'nodejs'
 export const maxDuration = 300
@@ -21,6 +21,10 @@ const MAX_GENERATE_REQUESTS_PER_WINDOW = Number(process.env.MAX_GENERATE_REQUEST
 const RATE_LIMIT_WINDOW_MS = Number(process.env.GENERATE_RATE_LIMIT_WINDOW_MS ?? 60_000)
 const GENERATION_TIMEOUT_MS = Number(process.env.GENERATION_TIMEOUT_MS ?? 180_000)
 const DEFAULT_RUNPOD_ENDPOINT_ID = 'cu3rkjepnei4j2'
+const RUNPOD_REFERENCE_FETCH_TIMEOUT_MS = 20_000
+const MAX_REFERENCE_SOURCE_BYTES = 16 * 1024 * 1024
+const REFERENCE_SHEET_SIZE = 1024
+const REFERENCE_SHEET_GAP = 8
 const rateLimitBuckets = new Map<string, { count: number; resetAt: number }>()
 
 type GenerateRequest = {
@@ -83,6 +87,15 @@ type RunpodImageCandidate = {
   contentType?: string
 }
 
+type RunpodGenerationInput = {
+  prompt: string
+  width: number
+  height: number
+  image: string
+  images: string[]
+  image_urls: string[]
+}
+
 const RUNPOD_IMAGE_KEYS = [
   'image_url',
   'imageUrl',
@@ -139,6 +152,133 @@ function looksLikeImageValue(value: string) {
     /^data:image\/[a-z0-9.+-]+;base64,/i.test(normalized) ||
     (normalized.length > 256 && /^[a-z0-9+/_=\s-]+$/i.test(normalized))
   )
+}
+
+type ReferencePanel = { left: number; top: number; width: number; height: number }
+
+function referencePanelLayout(count: number): ReferencePanel[] {
+  if (count <= 1) {
+    return [{ left: 0, top: 0, width: REFERENCE_SHEET_SIZE, height: REFERENCE_SHEET_SIZE }]
+  }
+
+  const half = Math.floor((REFERENCE_SHEET_SIZE - REFERENCE_SHEET_GAP) / 2)
+  if (count === 2) {
+    return [
+      { left: 0, top: 0, width: half, height: REFERENCE_SHEET_SIZE },
+      { left: half + REFERENCE_SHEET_GAP, top: 0, width: half, height: REFERENCE_SHEET_SIZE },
+    ]
+  }
+
+  const panels = [
+    { left: 0, top: 0, width: half, height: half },
+    { left: half + REFERENCE_SHEET_GAP, top: 0, width: half, height: half },
+    { left: 0, top: half + REFERENCE_SHEET_GAP, width: half, height: half },
+    {
+      left: half + REFERENCE_SHEET_GAP,
+      top: half + REFERENCE_SHEET_GAP,
+      width: half,
+      height: half,
+    },
+  ]
+
+  if (count === 3) {
+    panels[2] = { ...panels[2], left: Math.floor((REFERENCE_SHEET_SIZE - half) / 2) }
+  }
+  return panels.slice(0, count)
+}
+
+export function runpodReferencePrompt(count: number) {
+  const positions =
+    count <= 1
+      ? ['full-frame reference']
+      : count === 2
+        ? ['left panel', 'right panel']
+        : count === 3
+          ? ['top-left panel', 'top-right panel', 'bottom-center panel']
+          : ['top-left panel', 'top-right panel', 'bottom-left panel', 'bottom-right panel']
+  const mapping = positions.slice(0, count).map((position, index) => `Element ${index + 1} is the ${position}`).join('; ')
+
+  return `Use the attached visual references, not only their text labels. ${mapping}. Treat every panel as a separate source and apply only the role assigned to that Element. Do not reproduce the sheet, panel layout, borders, or unrelated people and backgrounds. Produce one cohesive final image, never a collage.`
+}
+
+export async function buildRunpodReferenceSheet(images: Buffer[]) {
+  if (!images.length || images.length > MAX_GENERATION_REFERENCES) {
+    throw new Error(`FLUX.2 Klein requires between 1 and ${MAX_GENERATION_REFERENCES} reference images.`)
+  }
+
+  const layout = referencePanelLayout(images.length)
+  const background = { r: 245, g: 245, b: 245 }
+  const panels = await Promise.all(
+    images.map(async (image, index) => {
+      const panel = layout[index]
+      const input = await sharp(image)
+        .rotate()
+        .resize(panel.width, panel.height, { fit: 'contain', background })
+        .flatten({ background })
+        .jpeg({ quality: 92, chromaSubsampling: '4:4:4' })
+        .toBuffer()
+      return { input, left: panel.left, top: panel.top }
+    })
+  )
+
+  return sharp({
+    create: {
+      width: REFERENCE_SHEET_SIZE,
+      height: REFERENCE_SHEET_SIZE,
+      channels: 3,
+      background: { r: 17, g: 24, b: 39 },
+    },
+  })
+    .composite(panels)
+    .jpeg({ quality: 92, chromaSubsampling: '4:4:4' })
+    .toBuffer()
+}
+
+async function fetchRunpodReference(url: string, index: number) {
+  const response = await withTimeout(
+    fetch(url, { redirect: 'follow', headers: { Accept: 'image/*' } }),
+    RUNPOD_REFERENCE_FETCH_TIMEOUT_MS,
+    `Reference image ${index + 1}`
+  )
+  if (!response.ok) throw new Error(`Could not fetch reference image ${index + 1} (${response.status}).`)
+
+  const contentType = response.headers.get('content-type')
+  if (contentType && !contentType.startsWith('image/')) {
+    throw new Error(`Reference image ${index + 1} did not return image data.`)
+  }
+
+  const declaredSize = Number(response.headers.get('content-length'))
+  if (Number.isFinite(declaredSize) && declaredSize > MAX_REFERENCE_SOURCE_BYTES) {
+    throw new Error(`Reference image ${index + 1} is too large.`)
+  }
+
+  const buffer = Buffer.from(await response.arrayBuffer())
+  if (!buffer.byteLength || buffer.byteLength > MAX_REFERENCE_SOURCE_BYTES) {
+    throw new Error(`Reference image ${index + 1} is empty or too large.`)
+  }
+  return buffer
+}
+
+export async function prepareRunpodGenerationInput(input: CompiledGenerationInput): Promise<RunpodGenerationInput> {
+  const imageUrls = [...new Set(input.image_urls)].slice(0, MAX_GENERATION_REFERENCES)
+  if (!imageUrls.length) throw new Error('Add at least one usable visual reference before generating.')
+
+  const image =
+    imageUrls.length === 1
+      ? imageUrls[0]
+      : (await buildRunpodReferenceSheet(await Promise.all(imageUrls.map(fetchRunpodReference)))).toString('base64')
+
+  return {
+    prompt: `${input.prompt} ${runpodReferencePrompt(imageUrls.length)}`.replace(/\s+/g, ' ').trim(),
+    width: runpodImageDimension(process.env.RUNPOD_IMAGE_WIDTH, 1024),
+    height: runpodImageDimension(process.env.RUNPOD_IMAGE_HEIGHT, 1024),
+    image,
+    // These original URLs let an upgraded worker use FLUX.2 Klein's native
+    // multi-reference path; `image` remains compatible with the current
+    // single-image Runpod handler by carrying an ordered reference sheet.
+    images: imageUrls,
+    image_urls: imageUrls,
+  }
 }
 
 function parseEmbeddedJson(value: string) {
@@ -296,7 +436,7 @@ function checkRateLimit(key: string) {
   return null
 }
 
-async function runGeneration(input: CompiledGenerationInput, boardId: string, slot: number) {
+async function runGeneration(input: RunpodGenerationInput, boardId: string, slot: number) {
   const apiKey = process.env.RUNPOD_API_KEY?.trim()
   if (!apiKey) throw new Error('Missing RUNPOD_API_KEY.')
 
@@ -311,9 +451,7 @@ async function runGeneration(input: CompiledGenerationInput, boardId: string, sl
       },
       body: JSON.stringify({
         input: {
-          prompt: input.prompt,
-          width: runpodImageDimension(process.env.RUNPOD_IMAGE_WIDTH, 1024),
-          height: runpodImageDimension(process.env.RUNPOD_IMAGE_HEIGHT, 1024),
+          ...input,
           seed,
         },
       }),
@@ -392,6 +530,8 @@ export async function POST(request: NextRequest) {
       return Response.json({ error: 'Missing RUNPOD_API_KEY.' }, { status: 500 })
     }
 
+    const runpodInput = await prepareRunpodGenerationInput(compiled)
+
     const supabase = createServiceSupabaseClient()
     const actionId = crypto.randomUUID()
     const quote = quoteFalAction('generate_image', count)
@@ -456,13 +596,13 @@ export async function POST(request: NextRequest) {
           model: compiled.model,
           creditsBalance: reservation.creditsBalance,
           requiredCredits: quote.credits,
-          prompt: compiled.prompt,
+          prompt: runpodInput.prompt,
           palette: metadata.palette,
           paletteSource: metadata.paletteSource,
         })
 
         const runSlot = (slot: number) =>
-          runGeneration(compiled, boardId, slot)
+          runGeneration(runpodInput, boardId, slot)
             .then((output) => {
               successfulOutputs += 1
               writeEvent(controller, { type: 'output', ...output })

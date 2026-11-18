@@ -1,6 +1,13 @@
 import assert from 'node:assert/strict'
 import test from 'node:test'
-import { describeRunpodShape, findRunpodImage } from '@/app/api/generate/route'
+import sharp from 'sharp'
+import {
+  buildRunpodReferenceSheet,
+  describeRunpodShape,
+  findRunpodImage,
+  prepareRunpodGenerationInput,
+  runpodReferencePrompt,
+} from '@/app/api/generate/route'
 
 test('finds the FLUX.2 worker base64 image output', () => {
   const image = Buffer.alloc(300, 42).toString('base64')
@@ -53,4 +60,55 @@ test('describes output structure without exposing its string contents', () => {
   const description = describeRunpodShape({ payload: { image: secretImage }, seed: 42 })
   assert.equal(description, 'object{payload:object{image:string(400)},seed:number}')
   assert.equal(description.includes(secretImage), false)
+})
+
+test('builds a square reference sheet for multiple FLUX.2 inputs', async () => {
+  const redPortrait = await sharp({
+    create: { width: 160, height: 320, channels: 3, background: '#ff0000' },
+  }).png().toBuffer()
+  const blueLandscape = await sharp({
+    create: { width: 320, height: 160, channels: 3, background: '#0000ff' },
+  }).png().toBuffer()
+
+  const sheet = await buildRunpodReferenceSheet([redPortrait, blueLandscape])
+  const metadata = await sharp(sheet).metadata()
+
+  assert.equal(metadata.format, 'jpeg')
+  assert.equal(metadata.width, 1024)
+  assert.equal(metadata.height, 1024)
+})
+
+test('maps prompt element numbers to ordered reference-sheet panels', () => {
+  const prompt = runpodReferencePrompt(3)
+  assert.match(prompt, /Element 1 is the top-left panel/)
+  assert.match(prompt, /Element 2 is the top-right panel/)
+  assert.match(prompt, /Element 3 is the bottom-center panel/)
+  assert.match(prompt, /never a collage/)
+})
+
+test('includes original references and a compatible visual sheet in the Runpod input', async () => {
+  const red = await sharp({
+    create: { width: 64, height: 96, channels: 3, background: '#ff0000' },
+  }).png().toBuffer()
+  const blue = await sharp({
+    create: { width: 96, height: 64, channels: 3, background: '#0000ff' },
+  }).png().toBuffer()
+  const urls = [
+    `data:image/png;base64,${red.toString('base64')}`,
+    `data:image/png;base64,${blue.toString('base64')}`,
+  ]
+
+  const input = await prepareRunpodGenerationInput({
+    prompt: 'Use Element 1 for pose and Element 2 for outfit.',
+    image_urls: urls,
+    model: 'runpod/flux-2-klein',
+  })
+
+  assert.deepEqual(input.images, urls)
+  assert.deepEqual(input.image_urls, urls)
+  assert.notEqual(input.image, urls[0])
+  assert.match(input.prompt, /Use the attached visual references/)
+  const metadata = await sharp(Buffer.from(input.image, 'base64')).metadata()
+  assert.equal(metadata.width, 1024)
+  assert.equal(metadata.height, 1024)
 })
