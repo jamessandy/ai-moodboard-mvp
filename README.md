@@ -6,6 +6,10 @@ Moodblendy is a reference-driven AI moodboard app. The current model is sources 
 
 ```bash
 FAL_KEY=
+RUNPOD_API_KEY=
+RUNPOD_ENDPOINT_ID=cu3rkjepnei4j2
+RUNPOD_IMAGE_WIDTH=1024
+RUNPOD_IMAGE_HEIGHT=1024
 GOOGLE_FONTS_API_KEY=
 NEXT_PUBLIC_APP_URL=https://moodblendy.com
 NEXT_PUBLIC_SUPABASE_URL=
@@ -24,7 +28,8 @@ EXTRACT_RATE_LIMIT_WINDOW_MS=60000
 EXTRACTION_TIMEOUT_MS=180000
 ```
 
-`SUPABASE_SERVICE_ROLE_KEY` is server-only and must not be exposed to the browser.
+`SUPABASE_SERVICE_ROLE_KEY` and `RUNPOD_API_KEY` are server-only and must not be exposed to the browser.
+`RUNPOD_ENDPOINT_ID` defaults to the FLUX.2 Klein endpoint shown above. `RUNPOD_ENDPOINT_URL` can override the full Runpod `runsync` URL when needed.
 `NEXT_PUBLIC_APP_URL` controls generated auth redirects, share links, and metadata. Set it to `https://moodblendy.com` in production.
 `GOOGLE_FONTS_API_KEY` is optional and only needed to resolve fonts by Google Fonts family name. Direct `.ttf`, `.otf`, and `.woff` font URLs work without it.
 `NEXT_PUBLIC_POSTHOG_KEY` and `NEXT_PUBLIC_POSTHOG_HOST` enable client funnel events. `POSTHOG_SERVER_KEY` and `POSTHOG_HOST` are optional server-side overrides for API events; if omitted, server capture falls back to `NEXT_PUBLIC_POSTHOG_KEY`.
@@ -124,7 +129,7 @@ Example MCP client config:
 
 The tool name is `moodblendy.create_board`. It accepts a brief, style, colors, references, and notes, then returns a structured prompt payload that the app can use for board generation.
 
-Open the printed local URL. For image upload, pasted URL import, clipboard image import, and generated output storage, configure the Supabase env vars first. For generation, also set `FAL_KEY`.
+Open the printed local URL. For image upload, pasted URL import, clipboard image import, and generated output storage, configure the Supabase env vars first. For image generation, also set `RUNPOD_API_KEY`. `FAL_KEY` is only required for the optional 3D orbit feature.
 
 Useful checks:
 
@@ -144,13 +149,13 @@ Round 3 acceptance:
 - Extract palette from a source to create a `swatch`.
 - Add type samples and notes to the board.
 - Toggle tag chips on elements.
-- Open Chat and send an instruction to run 2 fal.ai generations through `POST /api/generate`.
+- Open Chat and send an instruction to run 2 FLUX.2 Klein generations on Runpod through `POST /api/generate`.
 - Watch outputs fill the tray progressively as each generation resolves.
 - Use Add to board on a chat image to add it as a taggable `element`.
 - Drag a finished tray image onto the board as a secondary convenience path.
 - Select a finished tray image, enter a headline and either a Google Fonts name or direct `.ttf`/`.otf`/`.woff` URL, then click Add text to append a composited output to the tray.
 - Swatch colors are injected directly into the assembled prompt.
-- Element cutout URLs are sent as generation references.
+- Element labels, roles, palette, notes, and type direction are assembled into the FLUX.2 prompt.
 - Users must sign up or log in before reaching the board. Email/password, Google OAuth, and magic links are supported.
 - Logged-in users can create, open, and switch between persisted boards. The active board autosaves its serialized native canvas document and brief.
 - Each user gets 10 free generated images. The remaining quota is shown in the UI and enforced in `/api/generate`.
@@ -177,9 +182,9 @@ Round 3 acceptance:
 }
 ```
 
-The response is newline-delimited JSON. The route ignores client-supplied counts and always attempts exactly 2 images per prompt. Each generated fal.ai image is fetched server-side, stored in `moodboard-outputs`, then streamed to the client as an `output` event with the Supabase Storage URL.
+The response is newline-delimited JSON. The route ignores client-supplied counts and model choices and always attempts exactly 2 FLUX.2 Klein images per prompt. Runpod may return an image URL, data URL, or base64 image; the route normalizes the result, stores it in `moodboard-outputs`, then streams an `output` event with the Supabase Storage URL.
 
-`/api/generate` requires a Supabase bearer token. Before calling fal.ai, it atomically reserves 2 images against `profiles.images_used` with `reserve_profile_images`; if `images_used + 2 > 10`, it returns `{ code: "limit_reached" }` and does not call fal.ai. After the stream settles, failed or cancelled outputs are refunded with `refund_profile_images`, so parallel requests cannot push a user past the 10-image cap.
+`/api/generate` requires a Supabase bearer token. Before calling Runpod, it atomically reserves the required credits; insufficient balances are rejected before inference. After the stream settles, failed or cancelled outputs are refunded, so parallel requests cannot overspend a user's balance.
 
 ## Compose text
 
@@ -189,7 +194,7 @@ Use fonts you are licensed to use. Google Fonts families are generally safe for 
 
 ## Conversational generation
 
-The floating Chat widget sends the current conversation plus a summary of the board to `POST /api/chat`. The route uses local app logic to turn recent user messages into a generation direction; there is no extra LLM provider or API key in this version. The client then reuses `POST /api/generate` with that prompt and the current board references, so the assembler, fal.ai model, storage, and add-to-board flow stay shared.
+The floating Chat widget sends the current conversation plus a summary of the board to `POST /api/chat`. The route uses local app logic to turn recent user messages into a generation direction; there is no extra LLM provider or API key in this version. The client then reuses `POST /api/generate` with that prompt, so the assembler, Runpod FLUX.2 model, storage, and add-to-board flow stay shared.
 
 Chat history is saved inside the board document as `chat`, alongside `sources` and `canvas`, and reloads with the board.
 

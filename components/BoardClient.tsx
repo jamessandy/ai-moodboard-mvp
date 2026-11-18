@@ -33,6 +33,7 @@ import {
 } from '@/lib/board'
 import { BoardSummary, StoredBoard } from '@/lib/boards'
 import { extractSubjectClient } from '@/lib/local-extract'
+import { GENERATION_MODEL_LABEL } from '@/lib/generation'
 import { APP_NAME, getBrowserAppUrl } from '@/lib/site'
 import { createBrowserSupabaseClient } from '@/lib/supabase/client'
 import { IMAGES_PER_GENERATION } from '@/lib/usage-constants'
@@ -322,9 +323,6 @@ export function BoardClient() {
     }
     setErrorState(message)
   }, [])
-  const [generationModel, setGenerationModel] = useState<string>('hf-spaces/black-forest-labs/FLUX.2-dev')
-  const generationModelRef = useRef(generationModel)
-
   const selectedOutput = useMemo(
     () => outputs.find((output) => output.slot === selectedOutputSlot && output.status === 'done' && output.url),
     [outputs, selectedOutputSlot]
@@ -336,7 +334,6 @@ export function BoardClient() {
   const [rightPanelTab, setRightPanelTab] = useState<'explore' | 'chat'>('explore')
   const [sidebarTab, setSidebarTab] = useState<'variations' | 'sources'>('variations')
   const [filmstripView, setFilmstripView] = useState<'carousel' | 'grid'>('carousel')
-  const [filterModelOnly, setFilterModelOnly] = useState(false)
   const [showComposeDrawer, setShowComposeDrawer] = useState(false)
   const [zoomLevelPercent, setZoomLevelPercent] = useState(100)
   const [canvasStats, setCanvasStats] = useState({
@@ -1556,7 +1553,6 @@ export function BoardClient() {
           boardId: getBoardId(),
           count: IMAGES_PER_GENERATION,
           board: getBoardDoc(),
-          model: generationModelRef.current,
         }),
       })
 
@@ -1748,7 +1744,6 @@ export function BoardClient() {
           boardId: getBoardId(),
           count: IMAGES_PER_GENERATION,
           board: { ...board, brief: chatResult.generationPrompt },
-          model: generationModelRef.current,
         }),
       })
 
@@ -2375,23 +2370,9 @@ export function BoardClient() {
             <div className="grid grid-cols-2 gap-2 text-[11px]">
               <div className="rounded-xl border border-slate-200 bg-slate-50 p-2">
                 <span className="block font-mono text-[8px] uppercase tracking-wider text-slate-500">ACTIVE MODEL</span>
-                <select
-                  value={generationModel}
-                  onChange={(event) => {
-                    generationModelRef.current = event.target.value
-                    setGenerationModel(event.target.value)
-                    setOutputs([])
-                    setSelectedOutputSlot(null)
-                    setError(null)
-                  }}
-                  className="mt-1 w-full bg-transparent font-sans text-xs font-bold text-slate-800 outline-none cursor-pointer"
-                  aria-label="Generation model"
-                >
-                  <option value="hf-spaces/black-forest-labs/FLUX.2-dev">Flux (HF Spaces)</option>
-                  <option value="pollinations/flux">Flux (Pollinations)</option>
-                  <option value="pollinations/krea">Krea (Pollinations)</option>
-                  <option value="fal-ai/nano-banana-pro/edit">Fal.ai (legacy)</option>
-                </select>
+                <div className="mt-1 truncate font-sans text-xs font-bold text-slate-800" title={GENERATION_MODEL_LABEL}>
+                  {GENERATION_MODEL_LABEL}
+                </div>
               </div>
 
               <div className="rounded-xl border border-slate-200 bg-slate-50 p-2">
@@ -2564,24 +2545,11 @@ export function BoardClient() {
                       VARIATIONS FILMSTRIP
                     </span>
                     <span className="rounded bg-slate-100 border border-slate-200 px-1.5 py-0.2 font-mono text-[9px] font-bold text-[#D95D24]">
-                      {outputs.filter((o) => o.status === 'done').length} / 4 SLOTS
+                      {outputs.filter((o) => o.status === 'done').length} / {IMAGES_PER_GENERATION} SLOTS
                     </span>
                   </div>
 
                   <div className="flex items-center gap-1.5">
-                    <button
-                      type="button"
-                      onClick={() => setFilterModelOnly((prev) => !prev)}
-                      className={`flex h-6 w-6 items-center justify-center rounded-full border transition ${
-                        filterModelOnly
-                          ? 'border-[#0F0C59] bg-[#0F0C59] text-white'
-                          : 'border-slate-200 bg-slate-50 text-slate-600 hover:bg-white hover:text-slate-900 shadow-2xs'
-                      }`}
-                      title={filterModelOnly ? 'Showing current model outputs' : 'Filter by model'}
-                    >
-                      <span className="text-[10px]">⚙️</span>
-                    </button>
-
                     <button
                       type="button"
                       onClick={() => setFilmstripView((prev) => (prev === 'carousel' ? 'grid' : 'carousel'))}

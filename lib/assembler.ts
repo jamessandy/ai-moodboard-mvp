@@ -9,6 +9,7 @@ import {
   cleanHexColors,
 } from '@/lib/board'
 import { Tag } from '@/lib/tags'
+import { GENERATION_MODEL_ID } from '@/lib/generation'
 
 export type PaletteExtractor = (url: string) => Promise<string[]>
 export type CompileMetadata = {
@@ -130,7 +131,7 @@ export async function compileBoardWithMetadata(
         .replace(/\s+/g, ' ')
         .trim(),
       image_urls,
-      model: 'hf-spaces/black-forest-labs/FLUX.2-dev',
+      model: GENERATION_MODEL_ID,
     },
     metadata: {
       palette: uniquePalette,

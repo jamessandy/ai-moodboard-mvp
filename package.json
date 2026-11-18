@@ -13,7 +13,6 @@
   "dependencies": {
     "@fal-ai/client": "1.10.1",
     "@google/model-viewer": "^4.3.1",
-    "@gradio/client": "^2.5.1",
     "@imgly/background-removal-node": "^1.4.5",
     "@modelcontextprotocol/sdk": "^1.0.0",
     "@supabase/supabase-js": "2.107.0",

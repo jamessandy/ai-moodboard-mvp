@@ -1,5 +1,3 @@
-import { fal } from '@fal-ai/client'
-import { Client, handle_file } from '@gradio/client'
 import { NextRequest } from 'next/server'
 import sharp from 'sharp'
 import { BoardDoc } from '@/lib/board'
@@ -14,6 +12,7 @@ import {
 import { IMAGES_PER_GENERATION } from '@/lib/usage'
 import { quoteFalAction } from '@/lib/credits/pricing'
 import { refundCredits, reserveCredits } from '@/lib/credits/wallet'
+import { GENERATION_MODEL_ID } from '@/lib/generation'
 
 export const runtime = 'nodejs'
 export const maxDuration = 300
@@ -21,33 +20,20 @@ export const maxDuration = 300
 const MAX_GENERATE_REQUESTS_PER_WINDOW = Number(process.env.MAX_GENERATE_REQUESTS_PER_WINDOW ?? 5)
 const RATE_LIMIT_WINDOW_MS = Number(process.env.GENERATE_RATE_LIMIT_WINDOW_MS ?? 60_000)
 const GENERATION_TIMEOUT_MS = Number(process.env.GENERATION_TIMEOUT_MS ?? 180_000)
-// FLUX.2's ZeroGPU duration grows by 0.8x per reference. At 30 steps,
-// two references request about 88 seconds; larger boards exceed its cap.
-const MAX_HF_REFERENCE_IMAGES = 2
+const DEFAULT_RUNPOD_ENDPOINT_ID = 'cu3rkjepnei4j2'
 const rateLimitBuckets = new Map<string, { count: number; resetAt: number }>()
 
 type GenerateRequest = {
   boardId?: string
   count?: number
   board: BoardDoc
-  model?: string
 }
 
-type FalImage = {
-  url: string
-  content_type?: string
-  file_name?: string
-  width?: number
-  height?: number
-}
-
-type FalResult = {
-  images?: FalImage[]
-}
-
-type GradioImage = {
-  url?: string
-  path?: string
+type RunpodResponse = {
+  id?: string
+  status?: string
+  output?: unknown
+  error?: unknown
 }
 
 const encoder = new TextEncoder()
@@ -92,6 +78,100 @@ async function storeGeneratedBuffer(buffer: Buffer, contentType: string, boardId
 
 type CompiledGenerationInput = Awaited<ReturnType<typeof compileBoardWithMetadata>>['compiled']
 
+type RunpodImageCandidate = {
+  value: string
+  contentType?: string
+}
+
+const RUNPOD_IMAGE_KEYS = ['image_url', 'url', 'image', 'message', 'data', 'base64', 'b64_json'] as const
+const RUNPOD_COLLECTION_KEYS = ['images', 'outputs', 'result'] as const
+
+function runpodEndpointUrl() {
+  const configuredUrl = process.env.RUNPOD_ENDPOINT_URL?.trim()
+  if (configuredUrl) {
+    const url = new URL(configuredUrl)
+    if (url.protocol !== 'https:' || url.hostname !== 'api.runpod.ai') {
+      throw new Error('RUNPOD_ENDPOINT_URL must be an HTTPS api.runpod.ai URL.')
+    }
+    return url.toString()
+  }
+
+  const endpointId = process.env.RUNPOD_ENDPOINT_ID?.trim() || DEFAULT_RUNPOD_ENDPOINT_ID
+  return `https://api.runpod.ai/v2/${encodeURIComponent(endpointId)}/runsync`
+}
+
+function runpodImageDimension(value: string | undefined, fallback: number) {
+  const parsed = Number(value)
+  if (!Number.isFinite(parsed)) return fallback
+  return Math.min(2048, Math.max(256, Math.round(parsed / 64) * 64))
+}
+
+function looksLikeImageValue(value: string) {
+  const normalized = value.trim()
+  return (
+    /^https?:\/\//i.test(normalized) ||
+    /^data:image\/[a-z0-9.+-]+;base64,/i.test(normalized) ||
+    (normalized.length > 256 && /^[a-z0-9+/_=\s-]+$/i.test(normalized))
+  )
+}
+
+export function findRunpodImage(value: unknown, depth = 0): RunpodImageCandidate | null {
+  if (depth > 5) return null
+  if (typeof value === 'string') {
+    return looksLikeImageValue(value) ? { value: value.trim() } : null
+  }
+  if (Array.isArray(value)) {
+    for (const item of value) {
+      const candidate = findRunpodImage(item, depth + 1)
+      if (candidate) return candidate
+    }
+    return null
+  }
+  if (!value || typeof value !== 'object') return null
+
+  const record = value as Record<string, unknown>
+  const contentType = [record.content_type, record.mime_type, record.type]
+    .find((entry): entry is string => typeof entry === 'string' && entry.startsWith('image/'))
+
+  for (const key of RUNPOD_IMAGE_KEYS) {
+    const candidate = findRunpodImage(record[key], depth + 1)
+    if (candidate) return { ...candidate, contentType: candidate.contentType ?? contentType }
+  }
+  for (const key of RUNPOD_COLLECTION_KEYS) {
+    const candidate = findRunpodImage(record[key], depth + 1)
+    if (candidate) return candidate
+  }
+  return null
+}
+
+function runpodErrorMessage(error: unknown) {
+  if (typeof error === 'string') return error.slice(0, 1000)
+  if (error && typeof error === 'object') {
+    const record = error as Record<string, unknown>
+    const message = record.message ?? record.error
+    if (typeof message === 'string') return message.slice(0, 1000)
+    try {
+      return JSON.stringify(error).slice(0, 1000)
+    } catch {
+      return 'Unknown Runpod error.'
+    }
+  }
+  return 'Unknown Runpod error.'
+}
+
+async function storeRunpodImage(candidate: RunpodImageCandidate, boardId: string, slot: number) {
+  if (/^https?:\/\//i.test(candidate.value)) {
+    return withTimeout(storeGeneratedImage(candidate.value, boardId, slot), 30_000, 'Generated image storage')
+  }
+
+  const dataUrl = candidate.value.match(/^data:(image\/[a-z0-9.+-]+);base64,([\s\S]+)$/i)
+  const contentType = dataUrl?.[1] ?? candidate.contentType ?? 'image/png'
+  const encoded = (dataUrl?.[2] ?? candidate.value).replace(/\s/g, '')
+  const buffer = Buffer.from(encoded, 'base64')
+  if (!buffer.byteLength) throw new Error('Runpod returned an empty image.')
+  return storeGeneratedBuffer(buffer, contentType, boardId, slot)
+}
+
 function withTimeout<T>(promise: Promise<T>, timeoutMs: number, label: string) {
   return Promise.race([
     promise,
@@ -120,134 +200,55 @@ function checkRateLimit(key: string) {
 }
 
 async function runGeneration(input: CompiledGenerationInput, boardId: string, slot: number) {
+  const apiKey = process.env.RUNPOD_API_KEY?.trim()
+  if (!apiKey) throw new Error('Missing RUNPOD_API_KEY.')
+
   const seed = Math.floor(Math.random() * 1_000_000_000)
-  const seedVal = seed
-
-  if (input.model.startsWith('pollinations/')) {
-    const model = input.model.slice('pollinations/'.length) || 'flux'
-    const url = new URL(`https://gen.pollinations.ai/image/${encodeURIComponent(input.prompt)}`)
-    url.searchParams.set('model', model)
-    url.searchParams.set('width', '1024')
-    url.searchParams.set('height', '1024')
-    url.searchParams.set('seed', String(seedVal))
-    const response = await withTimeout(
-      fetch(url, { headers: { Authorization: `Bearer ${process.env.POLLINATIONS_API_KEY}` } }),
-      GENERATION_TIMEOUT_MS,
-      'Pollinations generation'
-    )
-    if (!response.ok) {
-      const detail = await response.text().catch(() => '')
-      throw new Error(`Pollinations ${response.status}: ${detail || response.statusText}`)
-    }
-    const contentType = response.headers.get('content-type') ?? 'image/jpeg'
-    if (!contentType.startsWith('image/')) throw new Error('Pollinations did not return an image.')
-    const stored = await storeGeneratedBuffer(Buffer.from(await response.arrayBuffer()), contentType, boardId, slot)
-    return { slot, ...stored, seed: seedVal }
-  }
-
-  if (input.model.startsWith('hf-spaces/')) {
-    const parts = input.model.split('/')
-    const owner = parts[1]
-    const space = parts[2]
-    if (!owner || !space) throw new Error('Invalid HF Spaces model identifier.')
-
-    const token = process.env.HF_TOKEN ?? process.env.HUGGINGFACE_TOKEN ?? process.env.HUGGING_FACE_HUB_TOKEN
-    const client = await withTimeout(
-      Client.connect(`${owner}/${space}`, token ? { token: token as `hf_${string}` } : undefined),
-      30_000,
-      'HF Spaces connection'
-    )
-    let result
-    try {
-      const hfReferenceUrls = (input.image_urls ?? []).slice(0, MAX_HF_REFERENCE_IMAGES)
-      result = await withTimeout(
-        client.predict<unknown[]>('/infer', {
-          prompt: input.prompt,
-          input_images: hfReferenceUrls.map((url) => ({ image: handle_file(url), caption: null })),
-          seed: seedVal,
-          randomize_seed: false,
-          width: 1024,
-          height: 1024,
-          num_inference_steps: 30,
-          guidance_scale: 4,
-          prompt_upsampling: true,
-        }),
-        GENERATION_TIMEOUT_MS,
-        'HF Spaces generation'
-      )
-    } finally {
-      client.close()
-    }
-
-    const out = Array.isArray(result.data) ? result.data[0] : result.data
-
-    let buffer: Buffer | null = null
-    let contentType = 'image/png'
-
-    if (typeof out === 'string') {
-      if (out.startsWith('data:')) {
-        const match = out.match(/^data:(.+);base64,(.+)$/)
-        if (!match) throw new Error('HF Spaces returned unexpected data URL.')
-        contentType = match[1]
-        buffer = Buffer.from(match[2], 'base64')
-      } else if (/^https?:\/\//.test(out)) {
-        // it's a URL — store via the existing helper
-        const stored = await withTimeout(storeGeneratedImage(out, boardId, slot), 30_000, 'Generated image storage')
-        return { slot, url: stored.url, width: stored.width, height: stored.height, seed: seedVal }
-      } else {
-        // assume base64
-        buffer = Buffer.from(out, 'base64')
-      }
-    } else if (out && typeof out === 'object') {
-      const image = out as GradioImage
-      const imageUrl = image.url ?? image.path
-      if (imageUrl && /^https?:\/\//.test(imageUrl)) {
-        const stored = await withTimeout(storeGeneratedImage(imageUrl, boardId, slot), 30_000, 'Generated image storage')
-        return { slot, url: stored.url, width: stored.width, height: stored.height, seed: seedVal }
-      }
-    }
-
-    if (!buffer) throw new Error('HF Spaces did not return an image.')
-
-    const metadata = await sharp(buffer).metadata()
-    const supabase = await createServiceSupabaseClientWithBucket(OUTPUT_BUCKET)
-    const path = `${boardId}/${Date.now()}-${slot}-${crypto.randomUUID()}.${extensionFromType(contentType)}`
-    const { error } = await supabase.storage.from(OUTPUT_BUCKET).upload(path, buffer, {
-      contentType,
-      upsert: false,
-    })
-    if (error) throw error
-    const { data } = supabase.storage.from(OUTPUT_BUCKET).getPublicUrl(path)
-    return { slot, url: data.publicUrl, width: metadata.width, height: metadata.height, seed: seedVal }
-  }
-
-  // Default: fal.ai path
-  const result = await withTimeout(
-    fal.subscribe(input.model, {
-      input: {
-        prompt: input.prompt,
-        image_urls: input.image_urls,
-        num_images: 1,
-        seed: seedVal,
-        output_format: 'png',
+  const response = await withTimeout(
+    fetch(runpodEndpointUrl(), {
+      method: 'POST',
+      headers: {
+        Accept: 'application/json',
+        'Content-Type': 'application/json',
+        Authorization: `Bearer ${apiKey}`,
       },
+      body: JSON.stringify({
+        input: {
+          prompt: input.prompt,
+          width: runpodImageDimension(process.env.RUNPOD_IMAGE_WIDTH, 1024),
+          height: runpodImageDimension(process.env.RUNPOD_IMAGE_HEIGHT, 1024),
+          seed,
+        },
+      }),
     }),
     GENERATION_TIMEOUT_MS,
-    'fal.ai generation'
+    'Runpod generation'
   )
 
-  const data = result.data as FalResult
-  const image = data.images?.[0]
-  if (!image?.url) {
-    throw new Error('fal.ai did not return an image URL.')
+  const responseText = await response.text()
+  let result: RunpodResponse
+  try {
+    result = JSON.parse(responseText) as RunpodResponse
+  } catch {
+    throw new Error(`Runpod returned invalid JSON (${response.status}).`)
   }
 
-  const storedImage = await withTimeout(
-    storeGeneratedImage(image.url, boardId, slot),
-    30_000,
-    'Generated image storage'
-  )
-  return { slot, url: storedImage.url, width: storedImage.width ?? image.width, height: storedImage.height ?? image.height, seed: seedVal }
+  if (!response.ok) {
+    throw new Error(`Runpod ${response.status}: ${runpodErrorMessage(result.error ?? result.output)}`)
+  }
+  if (result.status && result.status !== 'COMPLETED') {
+    throw new Error(`Runpod job ${result.id ?? ''} ended with status ${result.status}: ${runpodErrorMessage(result.error)}`)
+  }
+
+  const candidate = findRunpodImage(result.output)
+  if (!candidate) throw new Error('Runpod completed without returning an image.')
+
+  const stored = await storeRunpodImage(candidate, boardId, slot)
+  const outputSeed =
+    result.output && typeof result.output === 'object' && Number.isFinite(Number((result.output as Record<string, unknown>).seed))
+      ? Number((result.output as Record<string, unknown>).seed)
+      : seed
+  return { slot, ...stored, seed: outputSeed }
 }
 
 export async function POST(request: NextRequest) {
@@ -276,13 +277,13 @@ export async function POST(request: NextRequest) {
       return Response.json({ error: 'Add at least one source or reference before generating.' }, { status: 400 })
     }
 
-    
-
     const { compiled, metadata } = await compileBoardWithMetadata(body.board)
-    // Allow client to override the compiled model (e.g. use an HF Spaces model)
-    if (body.model && typeof body.model === 'string') {
-      compiled.model = body.model
+    compiled.model = GENERATION_MODEL_ID
+
+    if (!process.env.RUNPOD_API_KEY?.trim()) {
+      return Response.json({ error: 'Missing RUNPOD_API_KEY.' }, { status: 500 })
     }
+
     const supabase = createServiceSupabaseClient()
     const actionId = crypto.randomUUID()
     const quote = quoteFalAction('generate_image', count)
@@ -298,7 +299,9 @@ export async function POST(request: NextRequest) {
     } else {
       reservation = await reserveCredits({
         supabase, userId: user.id, amount: quote.credits, actionId, actionType: 'generate_image',
-        metadata: { fal_model: compiled.model, requested_output_count: count, fal_usd: quote.falUsd },
+        metadata: {
+          provider: 'runpod', model: compiled.model, requested_output_count: count, estimated_usd: quote.falUsd,
+        },
       })
     }
 
@@ -314,16 +317,6 @@ export async function POST(request: NextRequest) {
         },
         { status: 402 }
       )
-    }
-
-    if (compiled.model.startsWith('fal-ai/')) {
-      if (!process.env.FAL_KEY) {
-        return Response.json({ error: 'Missing FAL_KEY.' }, { status: 500 })
-      }
-      fal.config({ credentials: process.env.FAL_KEY })
-    }
-    if (compiled.model.startsWith('pollinations/') && !process.env.POLLINATIONS_API_KEY) {
-      return Response.json({ error: 'Missing POLLINATIONS_API_KEY.' }, { status: 500 })
     }
 
     let successfulOutputs = 0
@@ -374,11 +367,7 @@ export async function POST(request: NextRequest) {
               })
             )
 
-        const jobs = compiled.model.startsWith('hf-spaces/')
-          ? (async () => {
-              for (let slot = 0; slot < count; slot += 1) await runSlot(slot)
-            })()
-          : Promise.allSettled(Array.from({ length: count }, (_, slot) => runSlot(slot)))
+        const jobs = Promise.allSettled(Array.from({ length: count }, (_, slot) => runSlot(slot)))
 
         jobs
           .then(async () => {
