@@ -224,7 +224,11 @@ export function describeRunpodShape(value: unknown, depth = 0): string {
   return `object{${entries.map(([key, nestedValue]) => `${key}:${describeRunpodShape(nestedValue, depth + 1)}`).join(',')}}`
 }
 
-function runpodWorkerError(output: unknown) {
+function runpodWorkerError(output: unknown): string | null {
+  if (typeof output === 'string') {
+    const parsed = parseEmbeddedJson(output)
+    return parsed === null ? null : runpodWorkerError(parsed)
+  }
   if (!output || typeof output !== 'object' || Array.isArray(output)) return null
   const record = output as Record<string, unknown>
   if (record.error !== undefined) return runpodErrorMessage(record.error)
@@ -333,11 +337,11 @@ async function runGeneration(input: CompiledGenerationInput, boardId: string, sl
     throw new Error(`Runpod job ${result.id ?? ''} ended with status ${result.status}: ${runpodErrorMessage(result.error)}`)
   }
 
-  const workerError = runpodWorkerError(result.output)
-  if (workerError) throw new Error(`Runpod worker error: ${workerError}`)
-
   const candidate = findRunpodImage(result.output) ?? findRunpodImage(result)
   if (!candidate) {
+    const workerError = runpodWorkerError(result.output)
+    if (workerError) throw new Error(`Runpod worker error: ${workerError}`)
+
     const outputShape = describeRunpodShape(result.output)
     console.error('Runpod completed without a supported image.', {
       jobId: result.id ?? null,
