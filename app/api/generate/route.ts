@@ -83,8 +83,34 @@ type RunpodImageCandidate = {
   contentType?: string
 }
 
-const RUNPOD_IMAGE_KEYS = ['image_url', 'url', 'image', 'message', 'data', 'base64', 'b64_json'] as const
-const RUNPOD_COLLECTION_KEYS = ['images', 'outputs', 'result'] as const
+const RUNPOD_IMAGE_KEYS = [
+  'image_url',
+  'imageUrl',
+  'output_url',
+  'outputUrl',
+  'url',
+  'image',
+  'output_image',
+  'generated_image',
+  'image_base64',
+  'image_data',
+  'message',
+  'data',
+  'base64',
+  'b64_json',
+] as const
+const RUNPOD_COLLECTION_KEYS = [
+  'images',
+  'outputs',
+  'result',
+  'results',
+  'artifacts',
+  'files',
+  'output',
+  'response',
+  'body',
+] as const
+const RUNPOD_DIAGNOSTIC_KEYS = new Set(['error', 'errors', 'traceback', 'logs'])
 
 function runpodEndpointUrl() {
   const configuredUrl = process.env.RUNPOD_ENDPOINT_URL?.trim()
@@ -115,12 +141,37 @@ function looksLikeImageValue(value: string) {
   )
 }
 
+function parseEmbeddedJson(value: string) {
+  const normalized = value.trim()
+  const looksLikeJson =
+    (normalized.startsWith('{') && normalized.endsWith('}')) ||
+    (normalized.startsWith('[') && normalized.endsWith(']'))
+  if (!looksLikeJson) return null
+
+  try {
+    return JSON.parse(normalized) as unknown
+  } catch {
+    return null
+  }
+}
+
+function byteArrayCandidate(value: unknown[]): RunpodImageCandidate | null {
+  if (value.length < 64 || !value.every((entry) => Number.isInteger(entry) && Number(entry) >= 0 && Number(entry) <= 255)) {
+    return null
+  }
+  return { value: Buffer.from(value as number[]).toString('base64') }
+}
+
 export function findRunpodImage(value: unknown, depth = 0): RunpodImageCandidate | null {
-  if (depth > 5) return null
+  if (depth > 10) return null
   if (typeof value === 'string') {
-    return looksLikeImageValue(value) ? { value: value.trim() } : null
+    if (looksLikeImageValue(value)) return { value: value.trim() }
+    const parsed = parseEmbeddedJson(value)
+    return parsed === null ? null : findRunpodImage(parsed, depth + 1)
   }
   if (Array.isArray(value)) {
+    const bytes = byteArrayCandidate(value)
+    if (bytes) return bytes
     for (const item of value) {
       const candidate = findRunpodImage(item, depth + 1)
       if (candidate) return candidate
@@ -130,16 +181,58 @@ export function findRunpodImage(value: unknown, depth = 0): RunpodImageCandidate
   if (!value || typeof value !== 'object') return null
 
   const record = value as Record<string, unknown>
-  const contentType = [record.content_type, record.mime_type, record.type]
+  const contentType = [record.content_type, record.contentType, record.mime_type, record.mimeType, record.mime, record.type]
     .find((entry): entry is string => typeof entry === 'string' && entry.startsWith('image/'))
 
+  const visitedKeys = new Set<string>()
   for (const key of RUNPOD_IMAGE_KEYS) {
+    visitedKeys.add(key)
     const candidate = findRunpodImage(record[key], depth + 1)
     if (candidate) return { ...candidate, contentType: candidate.contentType ?? contentType }
   }
   for (const key of RUNPOD_COLLECTION_KEYS) {
+    visitedKeys.add(key)
     const candidate = findRunpodImage(record[key], depth + 1)
-    if (candidate) return candidate
+    if (candidate) return { ...candidate, contentType: candidate.contentType ?? contentType }
+  }
+
+  // Custom Runpod workers often add a payload or response wrapper. Traverse
+  // remaining fields so those wrappers do not require another deployment.
+  for (const [key, nestedValue] of Object.entries(record)) {
+    if (visitedKeys.has(key) || RUNPOD_DIAGNOSTIC_KEYS.has(key)) continue
+    const candidate = findRunpodImage(nestedValue, depth + 1)
+    if (candidate) return { ...candidate, contentType: candidate.contentType ?? contentType }
+  }
+  return null
+}
+
+export function describeRunpodShape(value: unknown, depth = 0): string {
+  if (depth > 3) return '...'
+  if (value === null) return 'null'
+  if (Array.isArray(value)) {
+    const first = value.length ? describeRunpodShape(value[0], depth + 1) : 'empty'
+    return `array(${value.length})<${first}>`
+  }
+  if (typeof value === 'string') {
+    const parsed = parseEmbeddedJson(value)
+    if (parsed !== null) return `json-string<${describeRunpodShape(parsed, depth + 1)}>`
+    return `string(${value.length})`
+  }
+  if (typeof value !== 'object') return typeof value
+
+  const entries = Object.entries(value as Record<string, unknown>).slice(0, 12)
+  return `object{${entries.map(([key, nestedValue]) => `${key}:${describeRunpodShape(nestedValue, depth + 1)}`).join(',')}}`
+}
+
+function runpodWorkerError(output: unknown) {
+  if (!output || typeof output !== 'object' || Array.isArray(output)) return null
+  const record = output as Record<string, unknown>
+  if (record.error !== undefined) return runpodErrorMessage(record.error)
+  if (Array.isArray(record.errors) && record.errors.length) return runpodErrorMessage(record.errors)
+
+  const status = typeof record.status === 'string' ? record.status.toLowerCase() : ''
+  if (['error', 'failed', 'failure'].includes(status)) {
+    return runpodErrorMessage(record.message ?? record.status)
   }
   return null
 }
@@ -240,8 +333,19 @@ async function runGeneration(input: CompiledGenerationInput, boardId: string, sl
     throw new Error(`Runpod job ${result.id ?? ''} ended with status ${result.status}: ${runpodErrorMessage(result.error)}`)
   }
 
-  const candidate = findRunpodImage(result.output)
-  if (!candidate) throw new Error('Runpod completed without returning an image.')
+  const workerError = runpodWorkerError(result.output)
+  if (workerError) throw new Error(`Runpod worker error: ${workerError}`)
+
+  const candidate = findRunpodImage(result.output) ?? findRunpodImage(result)
+  if (!candidate) {
+    const outputShape = describeRunpodShape(result.output)
+    console.error('Runpod completed without a supported image.', {
+      jobId: result.id ?? null,
+      status: result.status ?? null,
+      outputShape,
+    })
+    throw new Error(`Runpod completed without returning a supported image. Output shape: ${outputShape}`)
+  }
 
   const stored = await storeRunpodImage(candidate, boardId, slot)
   const outputSeed =
