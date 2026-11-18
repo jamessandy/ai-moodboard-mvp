@@ -9,3 +9,5 @@ pnpm-debug.log*
 .DS_Store
 *.tsbuildinfo
 .vercel
+__pycache__/
+*.pyc

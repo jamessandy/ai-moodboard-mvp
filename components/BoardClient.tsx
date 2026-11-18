@@ -1838,7 +1838,13 @@ export function BoardClient() {
             updateChatMessages((current) =>
               current.map((message) =>
                 message.id === assistantId
-                  ? { ...message, content: `${message.content}\n${event.error}`.trim(), status: 'error' }
+                  ? {
+                      ...message,
+                      content: message.content.includes(event.error)
+                        ? message.content
+                        : `${message.content}\n${event.error}`.trim(),
+                      status: 'error',
+                    }
                   : message
               )
             )

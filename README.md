@@ -156,7 +156,7 @@ Round 3 acceptance:
 - Select a finished tray image, enter a headline and either a Google Fonts name or direct `.ttf`/`.otf`/`.woff` URL, then click Add text to append a composited output to the tray.
 - Swatch colors are injected directly into the assembled prompt.
 - Up to four visual references are sent to FLUX.2 Klein, with identity, pose, and outfit roles prioritized.
-- Because the current Runpod handler accepts one `image`, multiple references are packed into an ordered 1024px reference sheet; the original URL list is also sent for native multi-reference workers.
+- The included custom `runpod-worker` accepts up to four native reference images. For single-image workers, the API also supplies an ordered 1024px compatibility sheet through `image`.
 - Element labels, roles, palette, notes, and type direction are assembled into the FLUX.2 prompt and aligned with the reference order.
 - Users must sign up or log in before reaching the board. Email/password, Google OAuth, and magic links are supported.
 - Logged-in users can create, open, and switch between persisted boards. The active board autosaves its serialized native canvas document and brief.
@@ -185,6 +185,8 @@ Round 3 acceptance:
 ```
 
 The response is newline-delimited JSON. The route ignores client-supplied counts and model choices and always attempts exactly 2 FLUX.2 Klein images per prompt. Before inference, the route prioritizes and de-duplicates up to four board references, builds an ordered reference sheet when more than one image is present, and sends it through the worker's `image` input. It also sends `images` and `image_urls` arrays so a native multi-reference worker can consume the originals. Runpod may return an image URL, data URL, or base64 image; the route normalizes the result, stores it in `moodboard-outputs`, then streams an `output` event with the Supabase Storage URL.
+
+Runpod public text-to-image endpoints validate a prompt-only schema and reject reference fields with `INVALID_INPUT`. Reference-conditioned generation therefore requires the custom worker in [`runpod-worker`](./runpod-worker/README.md), not the public FLUX.2 Klein text-to-image endpoint.
 
 `/api/generate` requires a Supabase bearer token. Before calling Runpod, it atomically reserves the required credits; insufficient balances are rejected before inference. After the stream settles, failed or cancelled outputs are refunded, so parallel requests cannot overspend a user's balance.
 

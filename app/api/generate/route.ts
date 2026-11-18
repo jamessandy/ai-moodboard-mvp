@@ -396,6 +396,17 @@ function runpodErrorMessage(error: unknown) {
   return 'Unknown Runpod error.'
 }
 
+export function runpodReferenceCapabilityError(message: string) {
+  if (
+    /INVALID_INPUT/i.test(message) &&
+    /extra inputs are not permitted/i.test(message) &&
+    /\b(?:image|images|image_urls)\b/i.test(message)
+  ) {
+    return 'This Runpod endpoint only supports text-to-image generation and cannot receive moodboard references. Deploy the project\'s runpod-worker image-edit endpoint, then set RUNPOD_ENDPOINT_ID to its endpoint ID.'
+  }
+  return null
+}
+
 async function storeRunpodImage(candidate: RunpodImageCandidate, boardId: string, slot: number) {
   if (/^https?:\/\//i.test(candidate.value)) {
     return withTimeout(storeGeneratedImage(candidate.value, boardId, slot), 30_000, 'Generated image storage')
@@ -472,7 +483,11 @@ async function runGeneration(input: RunpodGenerationInput, boardId: string, slot
     throw new Error(`Runpod ${response.status}: ${runpodErrorMessage(result.error ?? result.output)}`)
   }
   if (result.status && result.status !== 'COMPLETED') {
-    throw new Error(`Runpod job ${result.id ?? ''} ended with status ${result.status}: ${runpodErrorMessage(result.error)}`)
+    const workerMessage = runpodErrorMessage(result.error)
+    throw new Error(
+      runpodReferenceCapabilityError(workerMessage) ??
+        `Runpod job ${result.id ?? ''} ended with status ${result.status}: ${workerMessage}`
+    )
   }
 
   const candidate = findRunpodImage(result.output) ?? findRunpodImage(result)

@@ -6,6 +6,7 @@ import {
   describeRunpodShape,
   findRunpodImage,
   prepareRunpodGenerationInput,
+  runpodReferenceCapabilityError,
   runpodReferencePrompt,
 } from '@/app/api/generate/route'
 
@@ -60,6 +61,14 @@ test('describes output structure without exposing its string contents', () => {
   const description = describeRunpodShape({ payload: { image: secretImage }, seed: 42 })
   assert.equal(description, 'object{payload:object{image:string(400)},seed:number}')
   assert.equal(description.includes(secretImage), false)
+})
+
+test('turns a text-only endpoint schema failure into an actionable reference-worker error', () => {
+  assert.equal(
+    runpodReferenceCapabilityError('INVALID_INPUT: image: Extra inputs are not permitted'),
+    "This Runpod endpoint only supports text-to-image generation and cannot receive moodboard references. Deploy the project's runpod-worker image-edit endpoint, then set RUNPOD_ENDPOINT_ID to its endpoint ID."
+  )
+  assert.equal(runpodReferenceCapabilityError('CUDA out of memory'), null)
 })
 
 test('builds a square reference sheet for multiple FLUX.2 inputs', async () => {
