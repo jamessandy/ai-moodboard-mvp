@@ -10,9 +10,9 @@ RUN apt-get update \
     && apt-get install -y --no-install-recommends git \
     && rm -rf /var/lib/apt/lists/*
 
-COPY requirements.txt /worker/requirements.txt
+COPY runpod-worker/requirements.txt /worker/requirements.txt
 RUN python3.11 -m pip install --upgrade pip \
     && python3.11 -m pip install -r /worker/requirements.txt
 
-COPY handler.py /worker/handler.py
+COPY runpod-worker/handler.py /worker/handler.py
 CMD ["python3.11", "-u", "/worker/handler.py"]

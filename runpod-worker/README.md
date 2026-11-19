@@ -20,9 +20,16 @@ The handler loads every URL/base64 reference as a separate PIL image and passes 
 
 ## Deploy on Runpod
 
-1. Build and publish `runpod-worker/Dockerfile` to a container registry accessible by Runpod.
-2. In Runpod, create a **custom queue-based Serverless endpoint** from that container. Use one CUDA GPU with at least 16 GB VRAM, 20 GB or more container disk, active workers `0`, and max workers appropriate for your traffic.
-3. Add `HF_TOKEN` to the worker environment if the selected Hugging Face model requires it. A network volume mounted at `/runpod-volume` avoids downloading the model on every cold start.
-4. Copy the new endpoint ID to Vercel as `RUNPOD_ENDPOINT_ID` and redeploy Production. Keep `RUNPOD_API_KEY` server-side.
+1. Connect Runpod to the `jamessandy/ai-moodboard-mvp` GitHub repository.
+2. Create a new endpoint using **Import Git Repository**, select branch `main`, and set **Dockerfile Path** to `runpod-worker/Dockerfile`. Runpod builds from the repository root.
+3. Choose a **Queue** endpoint with one CUDA GPU per worker. Use at least 24 GB VRAM, 30 GB or more container disk, active workers `0`, and max workers appropriate for your traffic.
+4. Add `HF_TOKEN` to the worker environment if the selected Hugging Face model requires it. A network volume mounted at `/runpod-volume` avoids downloading the model on every cold start.
+5. Copy the new endpoint ID to Vercel as `RUNPOD_ENDPOINT_ID` and redeploy Production. Keep `RUNPOD_API_KEY` server-side.
+
+For a manual registry build, use the repository root as the Docker context:
+
+```bash
+docker build -f runpod-worker/Dockerfile -t your-registry/moodblendy-flux2:latest .
+```
 
 The app can then send up to four ordered references natively. `FLUX_MODEL_ID` defaults to `black-forest-labs/FLUX.2-klein-4B` and can be overridden in the worker environment.
